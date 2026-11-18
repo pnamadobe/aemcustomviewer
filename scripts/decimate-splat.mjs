@@ -170,7 +170,7 @@ function decimatePlyFile() {
 
   console.log(`Detected 3DGS .ply: ${totalSplats.toLocaleString()} vertices, ${rowBytes} bytes/vertex.`);
 
-  const stride = Math.max(1, Math.ceil(totalSplats / (maxSplats * 2.2)));
+  const stride = 1;
   const chunkRows = 16384;
   const inBuf = Buffer.allocUnsafe(chunkRows * rowBytes);
   const candidates = [];
@@ -187,9 +187,13 @@ function decimatePlyFile() {
       const x = inBuf.readFloatLE(rOff + offX);
       const y = inBuf.readFloatLE(rOff + offY);
       const z = inBuf.readFloatLE(rOff + offZ);
-      const sx = offSx >= 0 ? Math.exp(inBuf.readFloatLE(rOff + offSx)) : 0.01;
-      const sy = offSy >= 0 ? Math.exp(inBuf.readFloatLE(rOff + offSy)) : 0.01;
-      const sz = offSz >= 0 ? Math.exp(inBuf.readFloatLE(rOff + offSz)) : 0.01;
+      const sxLog = offSx >= 0 ? inBuf.readFloatLE(rOff + offSx) : -4.6;
+      const syLog = offSy >= 0 ? inBuf.readFloatLE(rOff + offSy) : -4.6;
+      const szLog = offSz >= 0 ? inBuf.readFloatLE(rOff + offSz) : -4.6;
+      if (Math.max(sxLog, syLog, szLog) > -1.05) continue;
+      const sx = Math.max(0.0004, Math.exp(sxLog));
+      const sy = Math.max(0.0004, Math.exp(syLog));
+      const sz = Math.max(0.0004, Math.exp(szLog));
       if (!Number.isFinite(x + y + z + sx + sy + sz)) continue;
 
       const r = offDc0 >= 0 ? clampByte((0.5 + SH_C0 * inBuf.readFloatLE(rOff + offDc0)) * 255) : 180;
@@ -219,7 +223,10 @@ function decimatePlyFile() {
       splatRec[30] = clampByte(q2 * 128 + 128);
       splatRec[31] = clampByte(q3 * 128 + 128);
 
-      const score = alpha * Math.cbrt(sx * sy * sz);
+      const minS = Math.min(sx, sy, sz);
+      const diskArea = (sx * sy * sz) / minS;
+      const distSq = x * x + y * y + z * z;
+      const score = (alpha * alpha * Math.sqrt(diskArea)) / (1 + 0.05 * distSq);
       candidates.push({ score, splatRec });
     }
   }
@@ -227,6 +234,29 @@ function decimatePlyFile() {
 
   candidates.sort((a, b) => b.score - a.score);
   const kept = candidates.slice(0, maxSplats);
+
+  // Recenter around P50 median centroid so indoor scenes orbit around the room center
+  if (kept.length > 100) {
+    const sampleN = Math.min(4096, kept.length);
+    const step = Math.max(1, Math.floor(kept.length / sampleN));
+    const xs = [], ys = [], zs = [];
+    for (let i = 0; i < kept.length; i += step) {
+      xs.push(kept[i].splatRec.readFloatLE(0));
+      ys.push(kept[i].splatRec.readFloatLE(4));
+      zs.push(kept[i].splatRec.readFloatLE(8));
+    }
+    xs.sort((a, b) => a - b); ys.sort((a, b) => a - b); zs.sort((a, b) => a - b);
+    const cx = xs[xs.length >> 1], cy = ys[ys.length >> 1], cz = zs[zs.length >> 1];
+    if (Math.hypot(cx, cy, cz) > 0.35) {
+      for (const item of kept) {
+        item.splatRec.writeFloatLE(item.splatRec.readFloatLE(0) - cx, 0);
+        item.splatRec.writeFloatLE(item.splatRec.readFloatLE(4) - cy, 4);
+        item.splatRec.writeFloatLE(item.splatRec.readFloatLE(8) - cz, 8);
+      }
+      console.log(`Recentered around median centroid (${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)})`);
+    }
+  }
+
   const outFd = fs.openSync(outputPath, 'w');
   for (const item of kept) fs.writeSync(outFd, item.splatRec);
   fs.closeSync(outFd);

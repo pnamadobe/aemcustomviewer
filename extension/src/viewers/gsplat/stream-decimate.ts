@@ -33,7 +33,7 @@ export interface StreamDecimateOptions {
   onProgress?: (loadedBytes: number, totalBytes?: number, keptSplats?: number) => void;
 }
 
-const SPLAT_CACHE_DB = 'acv-splat-cache-v2';
+const SPLAT_CACHE_DB = 'acv-splat-cache-v3';
 const SPLAT_CACHE_STORE = 'decimated';
 
 function openSplatCacheDb(): Promise<IDBDatabase> {
@@ -241,7 +241,8 @@ export async function streamAndDecimateSplatResponse(
         const syLog = offSy >= 0 ? dv.getFloat32(offset + offSy, true) : -4.6;
         const szLog = offSz >= 0 ? dv.getFloat32(offset + offSz, true) : -4.6;
         const maxLogScale = Math.max(sxLog, syLog, szLog);
-        // Reject giant blurry background/sky floaters (exp(-1.1) ≈ 0.33m radius) that destroy WebGL2 fill-rate
+        // Reject giant blurry background/sky floaters (exp(-1.1) ≈ 0.33m radius) that destroy WebGL2 fill-rate.
+        // Note: 2D surfel splats have min(sxLog, syLog, szLog) ≈ -40, which is normal and valid!
         if (maxLogScale > -1.05 || maxLogScale < -9.5) {
           offset += rowBytes;
           continue;
@@ -251,8 +252,8 @@ export async function streamAndDecimateSplatResponse(
         const y = dv.getFloat32(offset + offY, true);
         const z = dv.getFloat32(offset + offZ, true);
         const distSq = x * x + y * y + z * z;
-        // Reject far-flung outlier noise (> 22m from origin)
-        if (!Number.isFinite(distSq) || distSq > 484) {
+        // Reject far-flung outlier noise (> 15m from origin)
+        if (!Number.isFinite(distSq) || distSq > 225) {
           offset += rowBytes;
           continue;
         }
@@ -263,15 +264,21 @@ export async function streamAndDecimateSplatResponse(
           continue;
         }
 
-        // Importance weight: favor high opacity and proximity to scene core
-        const score = alpha / (1 + 0.04 * distSq);
+        // Clamp thin surfel normal axis to 0.4mm (0.0004) so WebGL2 covariance never underflows to 0
+        const sx = Math.max(0.0004, Math.exp(sxLog));
+        const sy = Math.max(0.0004, Math.exp(syLog));
+        const sz = Math.max(0.0004, Math.exp(szLog));
+        const minS = Math.min(sx, sy, sz);
+        const diskArea = (sx * sy * sz) / minS;
+
+        // Importance weight: favor high opacity^2, crisp surfel disk area, and proximity to scene core
+        const score = (alpha * alpha * Math.sqrt(diskArea)) / (1 + 0.05 * distSq);
         eligibleSeen++;
 
         let writeSlot = -1;
         if (kept < maxSplats) {
           writeSlot = kept++;
         } else {
-          // Weighted reservoir replacement: replace a random slot only if new splat is at least as important
           const candidateSlot = Math.floor(nextRand() * eligibleSeen);
           if (candidateSlot < maxSplats && score >= scores[candidateSlot] * 0.85) {
             writeSlot = candidateSlot;
@@ -280,9 +287,6 @@ export async function streamAndDecimateSplatResponse(
 
         if (writeSlot >= 0) {
           scores[writeSlot] = score;
-          const sx = Math.exp(sxLog);
-          const sy = Math.exp(syLog);
-          const sz = Math.exp(szLog);
 
           const r = offDc0 >= 0 ? clampByte((0.5 + SH_C0 * dv.getFloat32(offset + offDc0, true)) * 255) : 180;
           const g = offDc1 >= 0 ? clampByte((0.5 + SH_C0 * dv.getFloat32(offset + offDc1, true)) * 255) : 180;

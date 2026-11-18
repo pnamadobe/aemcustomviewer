@@ -278,6 +278,18 @@ export const gsplatViewer: ViewerPlugin = {
 
     const detectedMode = detectSplatMotionMode(activeSplat);
     let motionIdx = Math.max(0, MOTION_MODES.findIndex((m) => m.mode === detectedMode));
+    let insideMode = detectedMode === 'push';
+
+    // For indoor room scenes (detectedMode === 'push'), start INSIDE the room (radius 1.3m)
+    // instead of radius 5.0m outside the building walls!
+    const applyCameraPreset = (inside: boolean) => {
+      insideMode = inside;
+      controls.dispose();
+      controls = inside
+        ? new SPLAT.OrbitControls(camera, canvas, -0.35, 0.08, 1.35, true)
+        : new SPLAT.OrbitControls(camera, canvas, 0.5, 0.35, 4.5, true);
+    };
+    applyCameraPreset(insideMode);
 
     ctx.setProgress(null);
 
@@ -297,8 +309,7 @@ export const gsplatViewer: ViewerPlugin = {
     let thumbBtnLabel = '🎥 Save Card Anim';
 
     const resetCamera = () => {
-      controls.dispose();
-      controls = new SPLAT.OrbitControls(camera, canvas);
+      applyCameraPreset(insideMode);
       animPhase = 0;
     };
 
@@ -470,6 +481,15 @@ export const gsplatViewer: ViewerPlugin = {
               },
             ]
           : []),
+        {
+          id: 'cam-preset',
+          label: insideMode ? '🏠 Cam: Inside Room' : '🔭 Cam: Outside',
+          title: 'Toggle camera between standing inside a room scene vs orbiting outside an object',
+          onClick: () => {
+            applyCameraPreset(!insideMode);
+            renderToolbar();
+          },
+        },
         {
           id: 'reset',
           label: 'Reset',
