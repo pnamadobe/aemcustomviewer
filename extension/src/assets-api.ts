@@ -36,6 +36,23 @@ export async function getMetadata(a: AuthSnapshot, damPath: string, signal?: Abo
   };
 }
 
+export async function getSignedVideoUrl(a: AuthSnapshot, damPath: string, signal?: AbortSignal): Promise<string> {
+  const tryUrl = async (suffix: string): Promise<string | null> => {
+    const r = await fetch(`${a.apiBase}/adobe/repository${encodeURI(damPath)}${suffix}`, {
+      headers: buildHeaders(a),
+      signal,
+    });
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    return typeof j?.href === 'string' ? j.href : null;
+  };
+  return (
+    (await tryUrl(';api=block_download;renditionName=cq5dam.preview.mp4')) ??
+    (await tryUrl(';api=block_download')) ??
+    `${a.apiBase}${encodeURI(damPath)}`
+  );
+}
+
 export async function getOriginal(
   a: AuthSnapshot,
   meta: AssetMeta,
