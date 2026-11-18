@@ -24,9 +24,9 @@ const BACKGROUNDS: { label: string; color: [number, number, number, number]; css
 ];
 
 const MOTION_MODES: { mode: SplatMotionMode; label: string; badge: string }[] = [
-  { mode: 'orbit', label: 'Motion: Orbit (Object)', badge: 'ORBIT' },
-  { mode: 'push', label: 'Motion: Slow Push (Scene)', badge: 'PUSH' },
-  { mode: 'pan', label: 'Motion: Fixed Rotate (Scene)', badge: 'PAN' },
+  { mode: 'orbit', label: 'Mode: Orbit', badge: 'ORBIT' },
+  { mode: 'push', label: 'Mode: Push', badge: 'PUSH' },
+  { mode: 'pan', label: 'Mode: Pan', badge: 'PAN' },
 ];
 
 function extOf(name: string): string {
@@ -294,7 +294,7 @@ export const gsplatViewer: ViewerPlugin = {
     let autoPlay = false;
     let animPhase = 0;
     let isCapturingGif = false;
-    let thumbBtnLabel = '🎥 Save Animated Preview';
+    let thumbBtnLabel = '🎥 Save Card Anim';
 
     const resetCamera = () => {
       controls.dispose();
@@ -355,10 +355,10 @@ export const gsplatViewer: ViewerPlugin = {
       }
 
       isCapturingGif = false;
-      thumbBtnLabel = `✓ ${mode.toUpperCase()} Preview Saved`;
+      thumbBtnLabel = `✓ ${mode.toUpperCase()} Saved`;
       renderToolbar();
       setTimeout(() => {
-        thumbBtnLabel = '🎥 Save Animated Preview';
+        thumbBtnLabel = '🎥 Save Card Anim';
         renderToolbar();
       }, 2000);
     };
@@ -424,7 +424,7 @@ export const gsplatViewer: ViewerPlugin = {
       ctx.setActions([
         {
           id: 'autoplay',
-          label: autoPlay ? `▶ Preview ${m.badge}: ON` : `▶ Preview ${m.badge}`,
+          label: autoPlay ? `⏸ ${m.badge}` : `▶ ${m.badge}`,
           active: autoPlay,
           title: 'Preview the selected camera motion live in the viewer',
           onClick: () => {
@@ -449,13 +449,13 @@ export const gsplatViewer: ViewerPlugin = {
         },
         {
           id: 'decimate-50',
-          label: '✂ Decimate 50%',
+          label: '✂ -50%',
           title: 'Prune the least-visible 50% of splats in-place (by opacity × volume)',
           onClick: decimate50Percent,
         },
         {
           id: 'decimate-local',
-          label: '📂 Decimate Local 1GB+ File…',
+          label: '📂 Local File…',
           title: 'Pick a massive .ply or .splat from your Mac, stream-decimate it in the browser, and export',
           onClick: pickAndDecimateLocalFile,
         },
@@ -463,7 +463,7 @@ export const gsplatViewer: ViewerPlugin = {
           ? [
               {
                 id: 'export-decimated',
-                label: `⬇ Export .splat (${formatMB(buffer!.byteLength)})`,
+                label: `⬇ .splat (${formatMB(buffer!.byteLength)})`,
                 title: 'Download the current decimated .splat binary',
                 onClick: () =>
                   activeSplat?.saveToFile(ctx.meta.name.replace(/\.[^.]+$/, '.decimated.splat'), 'splat'),
@@ -472,7 +472,7 @@ export const gsplatViewer: ViewerPlugin = {
           : []),
         {
           id: 'reset',
-          label: 'Reset View',
+          label: 'Reset',
           title: 'Reset camera position and target',
           onClick: resetCamera,
         },
