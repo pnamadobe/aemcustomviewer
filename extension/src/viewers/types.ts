@@ -14,6 +14,8 @@ export interface ViewerContext {
   signal: AbortSignal;
   /** Streams the full asset binary with live byte progress. */
   fetchBuffer: (onProgress?: (loaded: number, total?: number) => void) => Promise<ArrayBuffer>;
+  /** Returns the raw streaming Response for chunk-by-chunk processing of 1GB+ files. */
+  fetchResponse: () => Promise<Response>;
   /** Fetches an inclusive byte range [start, end] via HTTP 206 Range request. */
   fetchRange: (start: number, end: number) => Promise<Uint8Array>;
   /** Updates the status text in the overlay header bar (e.g. splat count, FPS). */

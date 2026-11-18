@@ -1,5 +1,10 @@
 import * as SPLAT from 'gsplat';
 import type { ViewerPlugin } from '../types';
+import {
+  getCachedDecimatedSplat,
+  saveCachedDecimatedSplat,
+  streamAndDecimateSplatResponse,
+} from './stream-decimate';
 
 export type SplatMotionMode = 'orbit' | 'push' | 'pan';
 
@@ -194,18 +199,55 @@ export const gsplatViewer: ViewerPlugin = {
     hint.textContent = 'Left-drag: Orbit · Right-drag: Pan · Scroll: Zoom · WASD: Move';
     ctx.container.appendChild(hint);
 
-    ctx.setProgress(2, `Downloading ${ctx.meta.name}…`);
-    const buffer = await ctx.fetchBuffer((loaded, total) => {
-      if (total && total > 0) {
-        const pct = (loaded / total) * 90;
-        ctx.setProgress(pct, `Downloading ${formatMB(loaded)} / ${formatMB(total)} (${Math.round((loaded / total) * 100)}%)`);
+    ctx.setProgress(2, `Checking cache for ${ctx.meta.name}…`);
+    const cacheKey = `${ctx.meta.id || ctx.meta.damPath}:${ctx.meta.size || 0}`;
+    let buffer: ArrayBuffer | null = null;
+    let wasDecimated = false;
+    let origSplats = 0;
+
+    if (ext !== 'splatv') {
+      buffer = await getCachedDecimatedSplat(cacheKey);
+      if (buffer) wasDecimated = true;
+    }
+
+    if (!buffer) {
+      if (ext === 'splatv') {
+        buffer = await ctx.fetchBuffer((loaded, total) => {
+          if (total && total > 0) {
+            ctx.setProgress((loaded / total) * 90, `Downloading ${formatMB(loaded)} / ${formatMB(total)}`);
+          }
+        });
       } else {
-        ctx.setProgress(50, `Downloading ${formatMB(loaded)}…`);
+        const res = await ctx.fetchResponse();
+        const streamed = await streamAndDecimateSplatResponse(res, {
+          ext,
+          totalBytes: ctx.meta.size,
+          maxSplats: 600_000,
+          signal: ctx.signal,
+          onProgress: (loaded, total, kept) => {
+            if (total && total > 0) {
+              const pct = (loaded / total) * 90;
+              const decNote = total > 25 * 1048576 && kept ? ` · ${kept.toLocaleString()} splats kept` : '';
+              ctx.setProgress(
+                pct,
+                `Streaming ${formatMB(loaded)} / ${formatMB(total)} (${Math.round((loaded / total) * 100)}%)${decNote}`,
+              );
+            } else {
+              ctx.setProgress(50, `Streaming ${formatMB(loaded)}…`);
+            }
+          },
+        });
+        buffer = streamed.buffer;
+        wasDecimated = streamed.wasDecimated;
+        origSplats = streamed.originalSplats;
+        if (wasDecimated || (ctx.meta.size && ctx.meta.size > 25 * 1048576)) {
+          saveCachedDecimatedSplat(cacheKey, buffer).catch(() => {});
+        }
       }
-    });
+    }
     if (ctx.signal.aborted) return () => {};
 
-    ctx.setProgress(95, 'Parsing Gaussian Splats & uploading to WebGL2…');
+    ctx.setProgress(95, 'Uploading Gaussian Splats to WebGL2…');
 
     const scene = new SPLAT.Scene();
     const camera = new SPLAT.Camera();
@@ -223,14 +265,12 @@ export const gsplatViewer: ViewerPlugin = {
     let splatCount = 0;
     let activeSplat: SPLAT.Splat | null = null;
 
-    if (ext === 'ply') {
-      activeSplat = SPLAT.PLYLoader.LoadFromArrayBuffer(buffer, scene);
-      splatCount = activeSplat.data.vertexCount;
-    } else if (ext === 'splatv') {
+    if (ext === 'splatv') {
       const file = new File([buffer], ctx.meta.name);
       const sv = await SPLAT.SplatvLoader.LoadFromFileAsync(file, scene, camera);
       splatCount = sv.data.vertexCount;
     } else {
+      // streamAndDecimateSplatResponse always outputs normalized 32-byte .splat records (even when input was .ply)
       activeSplat = SPLAT.Loader.LoadFromArrayBuffer(buffer, scene);
       splatCount = activeSplat.data.vertexCount;
     }
@@ -366,6 +406,17 @@ export const gsplatViewer: ViewerPlugin = {
             renderToolbar();
           },
         },
+        ...(wasDecimated && activeSplat
+          ? [
+              {
+                id: 'export-decimated',
+                label: `⬇ Export Decimated (${formatMB(buffer!.byteLength)})`,
+                title: 'Download the decimated .splat binary',
+                onClick: () =>
+                  activeSplat?.saveToFile(ctx.meta.name.replace(/\.[^.]+$/, '.decimated.splat'), 'splat'),
+              },
+            ]
+          : []),
       ]);
     };
     renderToolbar();
@@ -374,7 +425,11 @@ export const gsplatViewer: ViewerPlugin = {
     let frames = 0;
     let lastFpsTick = performance.now();
     const sizeLabel = formatMB(buffer.byteLength);
-    const countLabel = `${splatCount.toLocaleString()} splats · ${sizeLabel}`;
+    const decLabel =
+      wasDecimated && origSplats > splatCount
+        ? `${splatCount.toLocaleString()} / ${origSplats.toLocaleString()} splats (decimated to ${sizeLabel})`
+        : `${splatCount.toLocaleString()} splats · ${sizeLabel}`;
+    const countLabel = decLabel;
     ctx.setStatus(countLabel);
 
     const tick = (now: number) => {

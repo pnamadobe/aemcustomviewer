@@ -79,6 +79,7 @@ if (ASSETS_VIEW_FRAME(location)) {
         container: overlay.body,
         signal: ctl.signal,
         fetchBuffer: (onProgress) => fetchArrayBufferWithProgress(currentAuth(), meta, ctl.signal, onProgress),
+        fetchResponse: () => getOriginal(currentAuth(), meta, { signal: ctl.signal }),
         fetchRange: async (start, end) => {
           const r = await getOriginal(currentAuth(), meta, { range: [start, end], signal: ctl.signal });
           return new Uint8Array(await r.arrayBuffer());
