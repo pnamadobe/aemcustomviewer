@@ -1,6 +1,12 @@
 # AEM Assets View – Custom Viewer Platform (`aemcustomviewer`)
 
-A Chrome Manifest V3 extension platform that injects interactive, high-performance custom viewers into the **main preview area** of the AEM as a Cloud Service **Assets View** (`CQ-assets-app`) details page for file types AEM does not natively render.
+A Chrome Manifest V3 extension platform that injects interactive, high-performance custom viewers into the **main preview area** of the AEM as a Cloud Service **Assets View** (`CQ-assets-app`) details page — plus **animated/custom Card View thumbnails** and **hover-scrub video previews** — for file types AEM does not natively render.
+
+## Demo Video
+
+[![AEM Assets View – Custom Viewer Platform Demo](https://img.youtube.com/vi/sXPfwydOvTk/maxresdefault.jpg)](https://youtu.be/sXPfwydOvTk)
+
+▶️ **[Watch the demo on YouTube](https://youtu.be/sXPfwydOvTk)**
 
 ## Built-in Viewer Plugins
 
