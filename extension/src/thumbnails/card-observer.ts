@@ -37,7 +37,7 @@ function parseAnimatedPreview(raw: string | null): AnimatedSplatPreview | null {
   if (!raw || !raw.startsWith('{')) return null;
   try {
     const parsed = JSON.parse(raw);
-    return parsed?.kind === 'acv-anim-v1' && Array.isArray(parsed.frames) ? parsed : null;
+    return parsed?.kind === 'acv-anim-v2' && Array.isArray(parsed.frames) ? parsed : null;
   } catch {
     return null;
   }
@@ -283,19 +283,24 @@ function mountCardPreview(
   const badgeHtml = `<span style="position:absolute;top:10px;left:10px;padding:2px 7px;border-radius:4px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font:700 10px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:2">${badgeText}</span>`;
 
   if (anim && anim.frames.length > 0) {
-    wrap.innerHTML = `${badgeHtml}<img src="${anim.poster}" alt="${name}" style="width:100%;height:100%;object-fit:cover;display:block" />`;
-    const img = wrap.querySelector<HTMLImageElement>('img')!;
-    let tick = 0;
+    wrap.innerHTML = `${badgeHtml}
+      <img class="acv-layer-a" src="${anim.poster}" alt="${name}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;transition:opacity 340ms ease-in-out;opacity:1" />
+      <img class="acv-layer-b" src="${anim.poster}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;transition:opacity 340ms ease-in-out;opacity:0" />`;
+    const imgA = wrap.querySelector<HTMLImageElement>('.acv-layer-a')!;
+    const imgB = wrap.querySelector<HTMLImageElement>('.acv-layer-b')!;
+    let showingA = true;
     let hovering = false;
 
-    // Build ping-pong or loop index sequence
     const seq: number[] = [];
     for (let i = 0; i < anim.frames.length; i++) seq.push(i);
     if (anim.pingPong && anim.frames.length > 2) {
       for (let i = anim.frames.length - 2; i >= 1; i--) seq.push(i);
     }
 
-    // Continuous smooth animation loop (90ms per frame = ~11fps turntable/push)
+    // Stagger starting phase per card so 30 cards don't move in lockstep
+    let tick = Math.floor(Math.random() * seq.length);
+
+    // Slow, ambient "living photo" drift (~12s full cycle, 380ms per crossfaded step)
     (wrap as any).__acvTimer = setInterval(() => {
       if (!wrap!.isConnected) {
         clearInterval((wrap as any).__acvTimer);
@@ -303,10 +308,20 @@ function mountCardPreview(
       }
       if (hovering) return;
       tick = (tick + 1) % seq.length;
-      img.src = anim.frames[seq[tick]];
-    }, 90);
+      const nextSrc = anim.frames[seq[tick]];
+      if (showingA) {
+        imgB.src = nextSrc;
+        imgB.style.opacity = '1';
+        imgA.style.opacity = '0';
+      } else {
+        imgA.src = nextSrc;
+        imgA.style.opacity = '1';
+        imgB.style.opacity = '0';
+      }
+      showingA = !showingA;
+    }, 380);
 
-    // Also allow interactive horizontal mouse scrubbing on hover
+    // On hover, let the user scrub directly with crisp instant frame response
     if (!(row as any).__acvAnimBound) {
       (row as any).__acvAnimBound = true;
       row.addEventListener('mouseenter', () => {
@@ -317,9 +332,16 @@ function mountCardPreview(
         if (r.width <= 0) return;
         const pct = Math.max(0, Math.min(0.999, (e.clientX - r.left) / r.width));
         const idx = Math.floor(pct * anim.frames.length);
-        img.src = anim.frames[idx];
+        imgA.style.transition = 'none';
+        imgB.style.transition = 'none';
+        imgA.src = anim.frames[idx];
+        imgA.style.opacity = '1';
+        imgB.style.opacity = '0';
+        showingA = true;
       });
       row.addEventListener('mouseleave', () => {
+        imgA.style.transition = 'opacity 340ms ease-in-out';
+        imgB.style.transition = 'opacity 340ms ease-in-out';
         hovering = false;
       });
     }
@@ -354,9 +376,9 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
 
   const keys = [assetId, damPath, name].filter(Boolean);
   const cached = await getThumbnail(keys);
-  // Upgrade old static single-image 3DGS thumbnails to animated 16-frame loops automatically
-  const isLegacyStaticSplat = plugin.id === 'gsplat' && cached && !cached.startsWith('{');
-  if (cached && !isLegacyStaticSplat) {
+  // Upgrade old static or v1 fast-loop 3DGS thumbnails to slow-drift acv-anim-v2 automatically
+  const isOutdatedSplat = plugin.id === 'gsplat' && cached && !parseAnimatedPreview(cached);
+  if (cached && !isOutdatedSplat) {
     mountCardPreview(row, previewSlot, descSlot, plugin, name, cached);
     return;
   }

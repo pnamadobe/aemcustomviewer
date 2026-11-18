@@ -4,7 +4,7 @@ import type { ViewerPlugin } from '../types';
 export type SplatMotionMode = 'orbit' | 'push' | 'pan';
 
 export interface AnimatedSplatPreview {
-  kind: 'acv-anim-v1';
+  kind: 'acv-anim-v2';
   mode: SplatMotionMode;
   pingPong: boolean;
   poster: string;
@@ -91,17 +91,18 @@ function applyCameraMotion(
   let radius = baseRadius;
 
   if (mode === 'orbit') {
-    // Full 360° turntable orbit for bounded objects
-    alpha = baseAlpha + t * Math.PI * 2;
+    // Calm ±18° turntable arc (ping-pong) so all 16 frames stay densely packed & subtle
+    alpha = baseAlpha + (t - 0.5) * 0.62;
+    beta = baseBeta + Math.sin(t * Math.PI) * 0.03;
   } else if (mode === 'push') {
-    // Slow cinema dolly push-in (32% closer) + subtle horizontal parallax sway
-    radius = baseRadius * (1 - 0.32 * t);
-    alpha = baseAlpha + Math.sin(t * Math.PI) * 0.16;
-    beta = baseBeta - Math.sin(t * Math.PI) * 0.05;
+    // Slow, subtle 14% cinema dolly push-in + gentle ±5° parallax drift
+    radius = baseRadius * (1 - 0.14 * t);
+    alpha = baseAlpha + Math.sin(t * Math.PI) * 0.09;
+    beta = baseBeta - Math.sin(t * Math.PI) * 0.025;
   } else {
-    // Fixed-tripod / gentle arc rotate (±24° yaw sweep) for scenes with walls
-    alpha = baseAlpha + (t - 0.5) * 0.84;
-    beta = baseBeta + Math.sin(t * Math.PI) * 0.06;
+    // Subtle fixed-tripod ±12° horizontal pan
+    alpha = baseAlpha + (t - 0.5) * 0.42;
+    beta = baseBeta + Math.sin(t * Math.PI) * 0.025;
   }
 
   const x = target.x + radius * Math.sin(alpha) * Math.cos(beta);
@@ -168,9 +169,9 @@ export const gsplatViewer: ViewerPlugin = {
     renderer.dispose();
 
     const payload: AnimatedSplatPreview = {
-      kind: 'acv-anim-v1',
+      kind: 'acv-anim-v2',
       mode,
-      pingPong: mode !== 'orbit',
+      pingPong: true,
       poster: frames[0],
       frames,
     };
@@ -303,9 +304,9 @@ export const gsplatViewer: ViewerPlugin = {
 
       if (frames.length > 0) {
         const payload: AnimatedSplatPreview = {
-          kind: 'acv-anim-v1',
+          kind: 'acv-anim-v2',
           mode,
-          pingPong: mode !== 'orbit',
+          pingPong: true,
           poster: frames[0],
           frames,
         };
@@ -380,9 +381,9 @@ export const gsplatViewer: ViewerPlugin = {
       if (ctx.signal.aborted) return;
       if (!isCapturingGif) {
         if (autoPlay) {
-          animPhase = (animPhase + 0.005) % 1;
+          animPhase = (animPhase + 0.0018) % 1;
           const mode = MOTION_MODES[motionIdx].mode;
-          const t = mode === 'orbit' ? animPhase : 0.5 - 0.5 * Math.cos(animPhase * Math.PI * 2);
+          const t = 0.5 - 0.5 * Math.cos(animPhase * Math.PI * 2);
           applyCameraMotion(camera, controls, 0.5, 0.32, 4.0, new SPLAT.Vector3(0, 0, 0), mode, t);
         } else {
           controls.update();
