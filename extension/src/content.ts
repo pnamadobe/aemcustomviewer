@@ -5,6 +5,8 @@ import { watchRoute } from './router';
 import { getMetadata, getOriginal, fetchArrayBufferWithProgress } from './assets-api';
 import { waitForPreview, mountOverlay, type Overlay } from './overlay';
 import { pickViewer } from './viewers';
+import { saveThumbnail } from './thumbnails/store';
+import { startCardThumbnailObserver } from './thumbnails/card-observer';
 
 const log = (...a: unknown[]) => DEBUG && console.debug('[acv]', ...a);
 
@@ -27,13 +29,15 @@ if (ASSETS_VIEW_FRAME(location)) {
   });
   document.dispatchEvent(new CustomEvent(HANDSHAKE_EVENT, { detail: channel }));
 
-  const getAuth = (signal: AbortSignal): Promise<AuthSnapshot> => {
+  const currentSyncAuth = (): AuthSnapshot | null => {
     const fromSS = readAuthFromSessionStorage();
-    if (fromSS) {
-      auth = fromSS;
-      return Promise.resolve(fromSS);
-    }
-    if (auth) return Promise.resolve(auth);
+    if (fromSS) auth = fromSS;
+    return auth;
+  };
+
+  const getAuth = (signal: AbortSignal): Promise<AuthSnapshot> => {
+    const sync = currentSyncAuth();
+    if (sync) return Promise.resolve(sync);
     return new Promise<AuthSnapshot>((res, rej) => {
       authWaiters.push(res);
       signal.addEventListener('abort', () => rej(signal.reason));
@@ -68,7 +72,7 @@ if (ASSETS_VIEW_FRAME(location)) {
       s.overlay = overlay;
       overlay.setMeta(plugin.badge, meta.name);
 
-      const currentAuth = () => readAuthFromSessionStorage() ?? auth ?? a;
+      const currentAuth = () => currentSyncAuth() ?? a;
 
       s.dispose = await plugin.mount({
         meta,
@@ -82,6 +86,7 @@ if (ASSETS_VIEW_FRAME(location)) {
         setStatus: overlay.setStatus,
         setActions: overlay.setActions,
         setProgress: overlay.setProgress,
+        saveCardThumbnail: (dataUrl) => saveThumbnail([meta.id, meta.damPath, meta.name], dataUrl),
       });
       log('mounted viewer plugin', plugin.id, 'for', meta.damPath);
     } catch (err) {
@@ -92,8 +97,10 @@ if (ASSETS_VIEW_FRAME(location)) {
 
   const start = () => {
     const stopRoute = watchRoute((r) => (r.kind === 'details' ? open(r.damPath) : teardown()));
+    const stopCards = startCardThumbnailObserver(currentSyncAuth);
     (window as any).__acvDispose = () => {
       stopRoute();
+      stopCards();
       teardown();
     };
   };

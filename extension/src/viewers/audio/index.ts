@@ -2,10 +2,47 @@ import type { ViewerPlugin } from '../types';
 
 export const audioSpectrumViewer: ViewerPlugin = {
   id: 'audio-spectrum',
-  label: 'Interactive Audio Spectrum & Waveform Viewer',
+  label: 'Audio Waveform',
   badge: 'AUDIO',
   extensions: ['mp3', 'wav', 'flac', 'ogg'],
   mimeTypes: ['audio/mpeg', 'audio/wav', 'audio/flac', 'audio/ogg'],
+
+  async renderThumbnail(_meta, fetchBuffer) {
+    const buffer = await fetchBuffer();
+    const ac = new OfflineAudioContext(1, 1, 44100);
+    const decoded = await ac.decodeAudioData(buffer.slice(0));
+    const pcm = decoded.getChannelData(0);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 360;
+    canvas.height = 360;
+    const c = canvas.getContext('2d')!;
+
+    const grad = c.createLinearGradient(0, 0, 360, 360);
+    grad.addColorStop(0, '#0f172a');
+    grad.addColorStop(1, '#1e1b4b');
+    c.fillStyle = grad;
+    c.fillRect(0, 0, 360, 360);
+
+    const bars = 64;
+    const step = Math.floor(pcm.length / bars);
+    const barW = 300 / bars;
+    for (let i = 0; i < bars; i++) {
+      let sum = 0;
+      const start = i * step;
+      for (let j = 0; j < step; j += 16) sum += Math.abs(pcm[start + j] || 0);
+      const avg = Math.min(1, (sum / (step / 16)) * 2.8);
+      const h = Math.max(8, avg * 180);
+      const x = 30 + i * barW;
+      const y = 180 - h / 2;
+      c.fillStyle = `hsl(${200 + i * 1.4}, 88%, ${55 + avg * 20}%)`;
+      c.beginPath();
+      c.roundRect(x, y, Math.max(2, barW - 2), h, 2);
+      c.fill();
+    }
+    return canvas.toDataURL('image/webp', 0.9);
+  },
+
   async mount(ctx) {
     ctx.setProgress(5, `Downloading ${ctx.meta.name}…`);
     const buffer = await ctx.fetchBuffer((loaded, total) => {

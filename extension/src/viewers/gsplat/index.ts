@@ -17,10 +17,49 @@ function formatMB(bytes: number): string {
 
 export const gsplatViewer: ViewerPlugin = {
   id: 'gsplat',
-  label: '3D Gaussian Splat Viewer',
+  label: '3D Gaussian Splat',
   badge: '3DGS',
   extensions: ['splat', 'ply', 'splatv'],
   mimeTypes: ['application/x-splat', 'model/x-splat'],
+
+  async renderThumbnail(meta, fetchBuffer) {
+    const ext = extOf(meta.name);
+    if (ext === 'splatv') return null;
+    const buffer = await fetchBuffer();
+    const canvas = document.createElement('canvas');
+    canvas.width = 360;
+    canvas.height = 360;
+
+    const scene = new SPLAT.Scene();
+    const camera = new SPLAT.Camera();
+    // Pass [] to skip the 100-frame FadeInPass so the first sorted frame is full opacity.
+    const renderer = new SPLAT.WebGLRenderer(canvas, []);
+    renderer.backgroundColor = new SPLAT.Color32(20, 22, 28, 255);
+    renderer.setSize(360, 360);
+
+    const controls = new SPLAT.OrbitControls(camera, canvas, 0.5, 0.35, 4.2, false);
+    if (ext === 'ply') {
+      SPLAT.PLYLoader.LoadFromArrayBuffer(buffer, scene);
+    } else {
+      SPLAT.Loader.LoadFromArrayBuffer(buffer, scene);
+    }
+
+    // Pump a few frames until the WASM depth-sort worker completes its first sort pass.
+    for (let i = 0; i < 25; i++) {
+      controls.update();
+      renderer.render(scene, camera);
+      await new Promise((r) => setTimeout(r, 35));
+      const updating = (renderer.renderProgram as any)?._renderData?.updating;
+      if (i >= 4 && !updating) break;
+    }
+    controls.update();
+    renderer.render(scene, camera);
+    const dataUrl = canvas.toDataURL('image/webp', 0.9);
+    controls.dispose();
+    renderer.dispose();
+    return dataUrl;
+  },
+
   async mount(ctx) {
     const ext = extOf(ctx.meta.name);
     const canvas = document.createElement('canvas');
@@ -92,6 +131,9 @@ export const gsplatViewer: ViewerPlugin = {
 
     let autoRotate = false;
     let rotAngle = 0.5;
+    let captureRequested = false;
+    let thumbSavedLabel = '📷 Set Thumbnail';
+
     const resetCamera = () => {
       controls.dispose();
       controls = new SPLAT.OrbitControls(camera, canvas);
@@ -126,6 +168,14 @@ export const gsplatViewer: ViewerPlugin = {
             renderToolbar();
           },
         },
+        {
+          id: 'capture-thumb',
+          label: thumbSavedLabel,
+          title: 'Capture current camera angle as the Card View thumbnail',
+          onClick: () => {
+            captureRequested = true;
+          },
+        },
         ...(activeSplat
           ? [
               {
@@ -142,6 +192,8 @@ export const gsplatViewer: ViewerPlugin = {
 
     let rafId = 0;
     let frames = 0;
+    let totalFrames = 0;
+    let autoThumbCaptured = false;
     let lastFpsTick = performance.now();
     const sizeLabel = formatMB(buffer.byteLength);
     const countLabel = `${splatCount.toLocaleString()} splats · ${sizeLabel}`;
@@ -157,6 +209,28 @@ export const gsplatViewer: ViewerPlugin = {
       }
       controls.update();
       renderer.render(scene, camera);
+      totalFrames++;
+
+      // Capture immediately after renderer.render() in the same JS turn while WebGL drawing buffer is intact
+      if (captureRequested || (!autoThumbCaptured && totalFrames === 110)) {
+        const wasManual = captureRequested;
+        captureRequested = false;
+        autoThumbCaptured = true;
+        try {
+          const dataUrl = canvas.toDataURL('image/webp', 0.9);
+          ctx.saveCardThumbnail(dataUrl);
+          if (wasManual) {
+            thumbSavedLabel = '✓ Thumbnail Saved';
+            renderToolbar();
+            setTimeout(() => {
+              thumbSavedLabel = '📷 Set Thumbnail';
+              renderToolbar();
+            }, 1800);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
 
       frames++;
       if (now - lastFpsTick >= 600) {

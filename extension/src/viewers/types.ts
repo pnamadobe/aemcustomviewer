@@ -22,6 +22,8 @@ export interface ViewerContext {
   setActions: (actions: ViewerToolbarAction[]) => void;
   /** Shows/updates (0..100) or hides (null) the loading progress bar. */
   setProgress: (pct: number | null, label?: string) => void;
+  /** Persists a rendered thumbnail data URL for Card View. */
+  saveCardThumbnail: (dataUrl: string) => Promise<void>;
 }
 
 export interface ViewerPlugin {
@@ -32,4 +34,6 @@ export interface ViewerPlugin {
   mimeTypes?: readonly string[];
   match?: (meta: AssetMeta) => boolean;
   mount: (ctx: ViewerContext) => Promise<() => void>;
+  /** Optional headless generator that produces a Card View thumbnail data URL from the binary. */
+  renderThumbnail?: (meta: AssetMeta, fetchBuffer: () => Promise<ArrayBuffer>) => Promise<string | null>;
 }
