@@ -223,7 +223,7 @@ export const gsplatViewer: ViewerPlugin = {
         const streamed = await streamAndDecimateSplatResponse(res, {
           ext,
           totalBytes: ctx.meta.size,
-          maxSplats: 600_000,
+          maxSplats: 900_000,
           signal: ctx.signal,
           onProgress: (loaded, total, kept) => {
             if (total && total > 0) {
@@ -492,6 +492,8 @@ export const gsplatViewer: ViewerPlugin = {
 
     let rafId = 0;
     let frames = 0;
+    let totalFrames = 0;
+    let autoSavedThumb = false;
     let lastFpsTick = performance.now();
     ctx.setStatus(countLabel);
 
@@ -507,6 +509,23 @@ export const gsplatViewer: ViewerPlugin = {
           controls.update();
         }
         renderer.render(scene, camera);
+        totalFrames++;
+        // Auto-save a static poster thumbnail for huge files on frame 90 so Card View has a preview
+        if (!autoSavedThumb && totalFrames === 90) {
+          autoSavedThumb = true;
+          try {
+            const thumbCanvas = document.createElement('canvas');
+            thumbCanvas.width = 280;
+            thumbCanvas.height = 280;
+            const sw = Math.min(canvas.width, canvas.height);
+            thumbCanvas
+              .getContext('2d')!
+              .drawImage(canvas, (canvas.width - sw) / 2, (canvas.height - sw) / 2, sw, sw, 0, 0, 280, 280);
+            ctx.saveCardThumbnail(thumbCanvas.toDataURL('image/webp', 0.85)).catch(() => {});
+          } catch {
+            /* ignore */
+          }
+        }
       }
 
       frames++;

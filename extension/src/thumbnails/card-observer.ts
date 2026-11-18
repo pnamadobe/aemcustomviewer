@@ -396,6 +396,17 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
       if (!auth || !folder) return;
       const ctl = new AbortController();
       const meta = await getMetadata(auth, damPath, ctl.signal);
+      // Do not silently download >60 MB files in the background from Card View;
+      // their thumbnail will be captured automatically when opened in Details View.
+      if (meta.size && meta.size > 60 * 1024 * 1024) {
+        failed.add(lockKey);
+        if (previewSlot.isConnected) {
+          const wrap = previewSlot.querySelector<HTMLElement>('[data-acv-card-thumb]');
+          const msg = wrap?.querySelector<HTMLElement>('div');
+          if (msg) msg.textContent = `${(meta.size / 1048576).toFixed(0)} MB · Open to render preview`;
+        }
+        return;
+      }
       const rendered = await plugin.renderThumbnail!(meta, () =>
         fetchArrayBufferWithProgress(auth, meta, ctl.signal),
       );
