@@ -1,59 +1,48 @@
-# Architecture – Assets View Custom Viewer
+# Architecture – AEM Assets View Custom Viewer Platform
 
-## Runtime topology
+## Runtime Topology
 ```
 experience.adobe.com (Unified Shell, top frame)
-└── iframe: Assets View origin (TBD → docs/research/01)
-    ├── MAIN world:     page-hook.js   (document_start; wraps fetch/XHR, reads Authorization)
-    │        │  CustomEvent on a per-load random channel (nonce handshake)
-    ├── ISOLATED world: content.js     (router, DOM observer, asset resolver, overlay host)
-    │        └── Shadow DOM overlay → viewer registry → <format> renderer (canvas/WebGL/WASM)
-    └── (optional) service worker: settings, enable/disable, allowlist by org
+└── same-origin iframe: /thunderbird/solutions/CQ-assets-app (id^="exc-app-sandbox-ddam")
+    ├── ISOLATED world: content.js
+    │    ├── auth.ts                 (reads repoId + shellCachedTokens directly from sessionStorage)
+    │    ├── router.ts               (watches #/detail/content/dam/... route changes)
+    │    ├── overlay.ts              (mounts closed Shadow DOM over [class*="Detail__previewContainer__"])
+    │    ├── thumbnails/
+    │    │    ├── store.ts           (persistent IndexedDB cache: acv-thumbnails-v1)
+    │    │    └── card-observer.ts   (Card View [role="row"][data-key] custom thumbnails & video hover-scrub)
+    │    └── viewers/                (ViewerPlugin registry)
+    │         ├── gsplat/            (.splat, .ply, .splatv — WebGL2 + WASM sort worker)
+    │         ├── model3d/           (.glb, .gltf, .obj, .stl — Three.js Studio PBR)
+    │         ├── font/              (.ttf, .otf, .woff, .woff2 — FontFace + OpenType fvar sliders)
+    │         ├── raw/               (.cr3, .cr2, .nef, .arw, .dng, .raf, .rw2, .orf, .pef, .iiq, .3fr, .hdr, .exr)
+    │         └── audio/             (.mp3, .wav, .flac, .ogg — WebAudio FFT + OfflineAudioContext waveform)
+    └── MAIN world: page-hook.js     (document_start fallback; intercepts fetch/XHR if sessionStorage changes)
 ```
 
-## Modules
-| Module | Responsibility | Depends on |
-|---|---|---|
-| `config.ts` | Origins, API base, header names, format allowlist. Every unverified value lives here | – |
-| `selectors.ts` | All DOM anchors, with an ordered fallback list per anchor | – |
-| `page-hook.ts` | MAIN world. Captures the bearer token and api-key/org headers from the app's own requests. Never logs or stores them | config |
-| `bridge.ts` | Typed MAIN↔ISOLATED messaging with nonce and source checks | – |
-| `router.ts` | Emits `route:details(assetId)` / `route:leave`. Uses a pushState patch, popstate/hashchange, and URL polling as a fallback | config |
-| `asset-resolver.ts` | Gets the assetId (URL first, DOM second) and then metadata (mime, name, size) | assets-api |
-| `assets-api.ts` | `getMetadata(id)`, `getOriginal(id, range?)` using captured auth | bridge, config |
-| `overlay.ts` | Finds the preview container, mounts an absolutely positioned Shadow-DOM host, tracks it with ResizeObserver, adds a "Show Adobe preview" toggle, tears down | selectors |
-| `viewers/index.ts` | Registry: `{ match(meta) → boolean, mount(el, src) → dispose }` | – |
-| `content.ts` | Orchestrator and state machine | all |
+## Module Responsibilities
+| Module | Responsibility |
+|---|---|
+| `src/config.ts` | Frame matcher (`CQ-assets-app`), route regexes, Content Repository API endpoints, default `x-api-key` (`aem-assets-frontend-1`) |
+| `src/selectors.ts` | Verified DOM anchors for the Details preview container (`[class*="Detail__previewContainer__"]`, `div.previewContainer`) |
+| `src/auth.ts` | Synchronous extraction of `repoId` and `shellCachedTokens` from Unified Shell's `sessionStorage` |
+| `src/page-hook.ts` & `src/bridge.ts` | Fallback `MAIN`-world `fetch`/`XHR` token capture bridged via nonce `CustomEvent` |
+| `src/router.ts` | Emits `details(damPath)` / `other` on SPA hash transitions |
+| `src/assets-api.ts` | Calls `/adobe/repository?path=<damPath>`, streams original binaries with byte progress, and fetches pre-signed `;api=block_download` URLs |
+| `src/overlay.ts` | Anchors a closed Shadow DOM overlay over the native preview container using `ResizeObserver`, providing the shared header bar, format badge, status telemetry, toolbar actions, progress bar, and **"Show Adobe preview"** passthrough toggle |
+| `src/thumbnails/store.ts` | Persistent `IndexedDB` (`acv-thumbnails-v1`) + memory cache keyed by `urn:aaid:aem:<uuid>` and DAM path; survives browser restarts |
+| `src/thumbnails/card-observer.ts` | Scans Card View (`div[role="row"][data-key^="urn:aaid:aem:"]`), renders headless plugin thumbnails into `[slot="preview"]`, crossfades 16-frame 3D previews over a calm ~12s cycle, and attaches 24-frame cached video hover-scrubbing to video cards |
+| `src/viewers/types.ts` & `src/viewers/index.ts` | `ViewerPlugin` and `ViewerContext` contract + central `VIEWER_PLUGINS` registry |
 
-## State machine (content.ts)
-`IDLE → ON_DETAILS(id) → RESOLVING → (UNSUPPORTED → IDLE) | WAIT_CONTAINER → MOUNTED → (route change) → TEARDOWN → IDLE`
-Any error moves to TEARDOWN and leaves the native UI as it was (fail safe).
-
-## Key decisions
-1. **Overlay, not replacement.** React owns the preview DOM.
-2. **Shadow DOM.** Isolates styles in both directions.
-3. **Token stays in memory.** It is used only for requests to the allowlisted API origin.
-4. **Feature detection for all selectors and endpoints.** If something is missing, the extension does nothing.
-5. **Renderer contract is format-agnostic.** The existing proprietary renderer plugs in through `viewers/<format>.ts`.
-6. **Fallback path.** Reuse the same `viewers/` package in a supported header-menu modal (App Builder UIX), so the renderer is written once.
-
-## Research-driven updates
-- **Rendering host:** heavy renderers (WASM/WebGL) run in an extension-origin iframe (`web_accessible_resources`) inside the Shadow DOM. This avoids the page's CSP and Trusted Types. The bytes are sent with `postMessage` as a transferable `ArrayBuffer`.
-- **Token capture:**
-  - Plan A: `chrome.webRequest.onSendHeaders` (`extraHeaders`) in the service worker. It is passive, sees the real `x-api-key`, and puts no token in the page.
-  - Plan B: the MAIN-world fetch/XHR hook (current scaffold).
-  - Plan C: `adobeIMS.getAccessToken()` in the top frame.
-  - With any plan, re-capture the token after a 401.
-- **Binary fetch:**
-  - Endpoint: `GET /adobe/assets/{id}/original/as/{name}`. It may redirect to a signed blob URL, and Range support is unverified.
-  - Consider making the request from the service worker, which avoids CORS.
-- **Supported fallback:**
-  - Extension point: `aem/assets/assetsview/1`. Add a header-menu button that calls `modal.openDialog({ type: 'fullscreen' })`.
-  - It gets the asset through `details.getCurrentResourceInfo()` and auth through `sharedContext`.
-  - It reuses the same `viewers/` package.
-  - It needs Assets Ultimate and a support ticket to enable.
-
-## Open questions (answered by docs/research/*)
-- Iframe origin and details route pattern (01)
-- Original-binary endpoint, required headers, Range/CORS (02)
-- Static `world: MAIN` vs executeScript, CSP/Trusted Types, WASM (03)
+## Viewer & Thumbnail Lifecycle
+1. **Card View (`#/browse/content/dam/...`)**:
+   - `card-observer.ts` watches `div[role="row"][data-key^="urn:aaid:aem:"]` via a filtered `MutationObserver`.
+   - **Video cards (`.mp4`, `.mov`, `.webm`, `.m4v`, `.ogv`)**: Displays a `⇄ SCRUB` badge. On first hover, streams AEM's `cq5dam.preview.mp4` proxy rendition via `;api=block_download;renditionName=cq5dam.preview.mp4` for immediate seeking while extracting a **24-frame WebP scrub strip** in the background and caching it in `IndexedDB` (`⇄ SCRUB · CACHED`). Subsequent hovers scrub directly from `IndexedDB` with zero network requests.
+   - **Plugin-matched cards (`.splat`, `.ply`, `.glb`, `.gltf`, `.obj`, `.stl`, `.ttf`, `.otf`, `.woff2`, `.cr3`, `.nef`, `.arw`, `.hdr`, `.exr`, `.mp3`, etc.)**:
+     - Checks `IndexedDB` first. If cached, mounts immediately into `[slot="preview"]` and updates the `"Binary"` subtitle in `[slot="description"]`.
+     - If uncached, queues `plugin.renderThumbnail(meta, fetchBuffer)` (1 asset at a time), caches the resulting static WebP or 16-frame `acv-anim-v2` WebP animation payload in `IndexedDB`, and swaps it into the card.
+   - **3D Card Animation (`acv-anim-v2`)**:
+     - Uses a gentle camera excursion (`±18°` orbit for bounded objects, `14%` slow dolly push for unbounded scenes, or `±12°` tripod pan) and steps every `380ms` with a `340ms` CSS opacity crossfade (~12s full cycle, random phase per card) so 30+ cards on screen remain calm. Hovering a card enables instant horizontal mouse scrubbing across the 16 frames.
+2. **Details View (`#/detail/content/dam/...`)**:
+   - `IDLE → ON_DETAILS(damPath) → METADATA(/adobe/repository) → PICK_PLUGIN → (UNSUPPORTED → IDLE) | WAIT_CONTAINER → MOUNT_OVERLAY → STREAM_BINARY → INTERACTIVE`
+   - Any error or route departure aborts in-flight requests, disposes WebGL/WebAudio contexts, and removes the overlay so the native Adobe UI remains intact.
