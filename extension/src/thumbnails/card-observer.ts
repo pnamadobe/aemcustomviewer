@@ -98,9 +98,10 @@ function attachVideoHoverScrub(
   const scrubCacheKeys = [`scrub:${assetId}`, `scrub:${damPath}`].filter((k) => k !== 'scrub:');
 
   const hintBadge = document.createElement('span');
+  hintBadge.setAttribute('data-acv-scrub-badge', '');
   hintBadge.textContent = '⇄ SCRUB';
   hintBadge.style.cssText =
-    'position:absolute;top:10px;left:10px;padding:2px 6px;border-radius:4px;background:rgba(15,23,42,0.78);color:#e2e8f0;font:700 9px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;z-index:2;pointer-events:none;backdrop-filter:blur(4px);border:1px solid rgba(255,255,255,0.14);';
+    'position:absolute;top:14px;left:44px;padding:2px 6px;border-radius:4px;background:rgba(15,23,42,0.78);color:#e2e8f0;font:700 9px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;z-index:2;pointer-events:none;backdrop-filter:blur(4px);border:1px solid rgba(255,255,255,0.14);';
   previewSlot.appendChild(hintBadge);
 
   let scrubWrap: HTMLElement | null = null;
@@ -280,7 +281,7 @@ function mountCardPreview(
 
   const anim = parseAnimatedPreview(rawPayload);
   const badgeText = anim ? `${plugin.badge} · ${anim.mode.toUpperCase()}` : plugin.badge;
-  const badgeHtml = `<span style="position:absolute;top:10px;left:10px;padding:2px 7px;border-radius:4px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font:700 10px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:2">${badgeText}</span>`;
+  const badgeHtml = `<span style="position:absolute;top:14px;left:44px;padding:2px 7px;border-radius:4px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font:700 10px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:2">${badgeText}</span>`;
 
   if (anim && anim.frames.length > 0) {
     wrap.innerHTML = `${badgeHtml}
