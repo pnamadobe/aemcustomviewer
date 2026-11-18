@@ -37,7 +37,7 @@ function parseAnimatedPreview(raw: string | null): AnimatedSplatPreview | null {
   if (!raw || !raw.startsWith('{')) return null;
   try {
     const parsed = JSON.parse(raw);
-    return parsed?.kind === 'acv-anim-v2' && Array.isArray(parsed.frames) ? parsed : null;
+    return parsed?.kind === 'acv-anim-v3' && Array.isArray(parsed.frames) ? parsed : null;
   } catch {
     return null;
   }

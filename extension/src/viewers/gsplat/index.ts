@@ -10,7 +10,7 @@ import { decimateSplatBufferInMemory } from './decimate-memory';
 export type SplatMotionMode = 'orbit' | 'push' | 'pan';
 
 export interface AnimatedSplatPreview {
-  kind: 'acv-anim-v2';
+  kind: 'acv-anim-v3';
   mode: SplatMotionMode;
   pingPong: boolean;
   poster: string;
@@ -18,7 +18,7 @@ export interface AnimatedSplatPreview {
 }
 
 const BACKGROUNDS: { label: string; color: [number, number, number, number]; css: string }[] = [
-  { label: 'BG: Dark', color: [20, 20, 22, 255], css: '#141416' },
+  { label: 'BG: Dark', color: [22, 23, 28, 255], css: '#16171c' },
   { label: 'BG: Slate', color: [42, 46, 55, 255], css: '#2a2e37' },
   { label: 'BG: Light', color: [232, 234, 238, 255], css: '#e8eaee' },
 ];
@@ -37,51 +37,121 @@ function formatMB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/**
- * Heuristic to distinguish bounded object splats from unbounded room/environment scenes:
- * Samples splat radial distances around the centroid and compares the 90th-percentile
- * radius (outer background/walls) to the median radius (foreground core).
- */
-function detectSplatMotionMode(splat: SPLAT.Splat | null): SplatMotionMode {
-  if (!splat) return 'orbit';
-  const pos = splat.data.positions;
-  const n = splat.data.vertexCount;
-  if (!pos || n < 100) return 'orbit';
-
-  const step = Math.max(1, Math.floor(n / 600));
-  let cx = 0,
-    cy = 0,
-    cz = 0,
-    count = 0;
-  for (let i = 0; i < n; i += step) {
-    cx += pos[i * 3];
-    cy += pos[i * 3 + 1];
-    cz += pos[i * 3 + 2];
-    count++;
-  }
-  cx /= count;
-  cy /= count;
-  cz /= count;
-
-  const radii: number[] = [];
-  for (let i = 0; i < n; i += step) {
-    const dx = pos[i * 3] - cx;
-    const dy = pos[i * 3 + 1] - cy;
-    const dz = pos[i * 3 + 2] - cz;
-    radii.push(Math.hypot(dx, dy, dz));
-  }
-  radii.sort((a, b) => a - b);
-  const r50 = radii[Math.floor(radii.length * 0.5)] || 1;
-  const r90 = radii[Math.floor(radii.length * 0.9)] || 1;
-
-  // Wide outer distribution relative to core => environment/scene splat => slow dolly push
-  return r90 / r50 > 2.8 ? 'push' : 'orbit';
+interface SplatSceneStats {
+  mode: SplatMotionMode;
+  target: SPLAT.Vector3;
+  idealRadius: number;
 }
 
 /**
- * Computes camera position and target for frame t in [0..1) given a starting spherical
- * camera pose and motion mode.
+ * Analyzes the splat point cloud to determine:
+ *   1. Whether it is a bounded object ('orbit') or an indoor room / environment scene ('push')
+ *   2. The visual centroid target (weighted toward the upper-middle of the subject in Y-down space)
+ *   3. The ideal camera distance (`idealRadius`) so thumbnails are neither 5m outside a room wall
+ *      nor zoomed into the bottom of a pot.
  */
+function analyzeSplatScene(splat: SPLAT.Splat | null, fileName = ''): SplatSceneStats {
+  const fallback: SplatSceneStats = {
+    mode: 'orbit',
+    target: new SPLAT.Vector3(0, 0, 0),
+    idealRadius: 3.0,
+  };
+  if (!splat) return fallback;
+
+  const pos = splat.data.positions;
+  const colors = splat.data.colors;
+  const n = splat.data.vertexCount;
+  if (!pos || n < 100) return fallback;
+
+  const step = Math.max(1, Math.floor(n / 2000));
+  const xs: number[] = [];
+  const ys: number[] = [];
+  const zs: number[] = [];
+
+  for (let i = 0; i < n; i += step) {
+    const a = colors ? colors[i * 4 + 3] : 255;
+    if (a < 80) continue;
+    xs.push(pos[i * 3]);
+    ys.push(pos[i * 3 + 1]);
+    zs.push(pos[i * 3 + 2]);
+  }
+  if (xs.length < 20) return fallback;
+
+  xs.sort((a, b) => a - b);
+  ys.sort((a, b) => a - b);
+  zs.sort((a, b) => a - b);
+
+  const q = (arr: number[], p: number) => arr[Math.min(arr.length - 1, Math.floor(arr.length * p))];
+  const cx = q(xs, 0.5);
+  // Bias Y slightly toward the 40th percentile (in Y-down space, lower Y is higher up on the subject/canopy)
+  const cy = q(ys, 0.42);
+  const cz = q(zs, 0.5);
+
+  const iqrX = q(xs, 0.75) - q(xs, 0.25);
+  const iqrY = q(ys, 0.75) - q(ys, 0.25);
+  const iqrZ = q(zs, 0.75) - q(zs, 0.25);
+  const iqrSpan = Math.hypot(iqrX, iqrY, iqrZ);
+
+  const radii: number[] = [];
+  for (let i = 0; i < xs.length; i++) {
+    radii.push(Math.hypot(xs[i] - cx, ys[i] - cy, zs[i] - cz));
+  }
+  radii.sort((a, b) => a - b);
+  const r50 = q(radii, 0.5) || 1;
+  const r90 = q(radii, 0.9) || 1;
+
+  // Room/interior scans have either wide IQR span (> 3.2m) or high outer-to-inner radius ratio
+  const isRoomScene =
+    r90 / r50 > 2.6 || iqrSpan > 3.2 || /room|shop|indoor|house|street|scene|milano/i.test(fileName);
+
+  if (isRoomScene) {
+    return {
+      mode: 'push',
+      target: new SPLAT.Vector3(cx, cy, cz),
+      // Stand inside the room looking across the interior
+      idealRadius: Math.max(0.9, Math.min(1.6, r50 * 0.65)),
+    };
+  }
+
+  return {
+    mode: 'orbit',
+    target: new SPLAT.Vector3(cx, cy, cz),
+    // Frame the full object comfortably in a square card
+    idealRadius: Math.max(1.8, Math.min(3.4, r50 * 2.1)),
+  };
+}
+
+/**
+ * Updates `camera.data.fx` / `fy` AND pushes the updated `focal` uniform to the WebGL2 program
+ * so `gsplat` doesn't use its hardcoded `fx = 1132` (which turns a 280x280 thumbnail canvas into
+ * an 8x telephoto microscope lens and blurs every splat by 4x!).
+ */
+function updateCameraFocalLength(
+  renderer: SPLAT.WebGLRenderer,
+  camera: SPLAT.Camera,
+  width: number,
+  height: number,
+  fovFactor: number, // ~0.82 for normal ~60° object lens, ~0.55 for wide ~85° room lens
+) {
+  const f = Math.min(width, height) * fovFactor;
+  camera.data.fx = f;
+  camera.data.fy = f;
+  camera.data.setSize(width, height);
+  camera.update();
+
+  try {
+    const gl = renderer.gl;
+    const prog = renderer.renderProgram?.program;
+    if (gl && prog) {
+      gl.useProgram(prog);
+      const loc = gl.getUniformLocation(prog, 'focal');
+      if (loc) gl.uniform2fv(loc, new Float32Array([f, f]));
+    }
+  } catch {
+    /* ignore if program not initialized yet */
+  }
+}
+
 function applyCameraMotion(
   camera: SPLAT.Camera,
   controls: SPLAT.OrbitControls,
@@ -97,16 +167,13 @@ function applyCameraMotion(
   let radius = baseRadius;
 
   if (mode === 'orbit') {
-    // Calm ±18° turntable arc (ping-pong) so all 16 frames stay densely packed & subtle
     alpha = baseAlpha + (t - 0.5) * 0.62;
     beta = baseBeta + Math.sin(t * Math.PI) * 0.03;
   } else if (mode === 'push') {
-    // Slow, subtle 14% cinema dolly push-in + gentle ±5° parallax drift
-    radius = baseRadius * (1 - 0.14 * t);
-    alpha = baseAlpha + Math.sin(t * Math.PI) * 0.09;
-    beta = baseBeta - Math.sin(t * Math.PI) * 0.025;
+    radius = baseRadius * (1 - 0.16 * t);
+    alpha = baseAlpha + Math.sin(t * Math.PI) * 0.12;
+    beta = baseBeta - Math.sin(t * Math.PI) * 0.02;
   } else {
-    // Subtle fixed-tripod ±12° horizontal pan
     alpha = baseAlpha + (t - 0.5) * 0.42;
     beta = baseBeta + Math.sin(t * Math.PI) * 0.025;
   }
@@ -130,53 +197,85 @@ export const gsplatViewer: ViewerPlugin = {
     const ext = extOf(meta.name);
     if (ext === 'splatv') return null;
     const buffer = await fetchBuffer();
-    const size = 280;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
+
+    // Render at 360x360 with scaled focal length so FOV and splat sharpness match a full viewport
+    const size = 360;
+    const glCanvas = document.createElement('canvas');
+    glCanvas.width = size;
+    glCanvas.height = size;
 
     const scene = new SPLAT.Scene();
     const camera = new SPLAT.Camera();
-    const renderer = new SPLAT.WebGLRenderer(canvas, []);
-    renderer.backgroundColor = new SPLAT.Color32(20, 22, 28, 255);
-    renderer.setSize(size, size);
-
-    const controls = new SPLAT.OrbitControls(camera, canvas, 0.5, 0.32, 4.2, false);
     const splat =
       ext === 'ply'
         ? SPLAT.PLYLoader.LoadFromArrayBuffer(buffer, scene)
         : SPLAT.Loader.LoadFromArrayBuffer(buffer, scene);
 
-    const mode = detectSplatMotionMode(splat);
-    const target = new SPLAT.Vector3(0, 0, 0);
+    const stats = analyzeSplatScene(splat, meta.name);
+    const fovFactor = stats.mode === 'push' ? 0.54 : 0.80;
+
+    // Set camera focal length BEFORE creating WebGLRenderer so _initialize() uploads the scaled focal uniform!
+    camera.data.fx = size * fovFactor;
+    camera.data.fy = size * fovFactor;
+    camera.data.setSize(size, size);
+
+    const renderer = new SPLAT.WebGLRenderer(glCanvas, []);
+    renderer.backgroundColor = new SPLAT.Color32(24, 26, 34, 255);
+    renderer.setSize(size, size);
+    updateCameraFocalLength(renderer, camera, size, size, fovFactor);
+
+    const baseAlpha = stats.mode === 'push' ? -0.35 : 0.45;
+    const baseBeta = stats.mode === 'push' ? 0.12 : 0.26;
+    const controls = new SPLAT.OrbitControls(
+      camera,
+      glCanvas,
+      baseAlpha,
+      baseBeta,
+      stats.idealRadius,
+      false,
+      stats.target,
+    );
+    // Disable damping during headless capture so each frame snaps immediately to the target pose!
+    controls.dampening = 1.0;
 
     // Warm up WASM depth-sort worker on initial pose
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 18; i++) {
       controls.update();
       renderer.render(scene, camera);
-      await new Promise((r) => setTimeout(r, 30));
+      await new Promise((r) => setTimeout(r, 35));
       const updating = (renderer.renderProgram as any)?._renderData?.updating;
-      if (i >= 4 && !updating) break;
+      if (i >= 5 && !updating) break;
     }
+
+    // 2D post-processing canvas for brightness/contrast lift + crisp 300x300 output
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = 300;
+    outCanvas.height = 300;
+    const outCtx = outCanvas.getContext('2d')!;
 
     const numFrames = 16;
     const frames: string[] = [];
     for (let f = 0; f < numFrames; f++) {
       const t = f / numFrames;
-      applyCameraMotion(camera, controls, 0.5, 0.32, 4.2, target, mode, t);
-      // Allow sort worker to sort new camera angle
+      applyCameraMotion(camera, controls, baseAlpha, baseBeta, stats.idealRadius, stats.target, stats.mode, t);
       renderer.render(scene, camera);
-      await new Promise((r) => setTimeout(r, 45));
+      await new Promise((r) => setTimeout(r, 55));
       renderer.render(scene, camera);
-      frames.push(canvas.toDataURL('image/webp', 0.82));
+
+      outCtx.fillStyle = '#181a22';
+      outCtx.fillRect(0, 0, 300, 300);
+      outCtx.filter = 'brightness(1.22) contrast(1.08) saturate(1.08)';
+      outCtx.drawImage(glCanvas, 0, 0, size, size, 0, 0, 300, 300);
+      outCtx.filter = 'none';
+      frames.push(outCanvas.toDataURL('image/webp', 0.85));
     }
 
     controls.dispose();
     renderer.dispose();
 
     const payload: AnimatedSplatPreview = {
-      kind: 'acv-anim-v2',
-      mode,
+      kind: 'acv-anim-v3',
+      mode: stats.mode,
       pingPong: true,
       poster: frames[0],
       frames,
@@ -271,37 +370,36 @@ export const gsplatViewer: ViewerPlugin = {
       const sv = await SPLAT.SplatvLoader.LoadFromFileAsync(file, scene, camera);
       splatCount = sv.data.vertexCount;
     } else {
-      // streamAndDecimateSplatResponse always outputs normalized 32-byte .splat records (even when input was .ply)
       activeSplat = SPLAT.Loader.LoadFromArrayBuffer(buffer, scene);
       splatCount = activeSplat.data.vertexCount;
     }
 
-    const detectedMode = detectSplatMotionMode(activeSplat);
-    let motionIdx = Math.max(0, MOTION_MODES.findIndex((m) => m.mode === detectedMode));
-    let insideMode = detectedMode === 'push';
-
-    // For indoor room scenes (detectedMode === 'push'), start INSIDE the room (radius 1.3m)
-    // instead of radius 5.0m outside the building walls!
-    const applyCameraPreset = (inside: boolean) => {
-      insideMode = inside;
-      controls.dispose();
-      controls = inside
-        ? new SPLAT.OrbitControls(camera, canvas, -0.35, 0.08, 1.35, true)
-        : new SPLAT.OrbitControls(camera, canvas, 0.5, 0.35, 4.5, true);
-    };
-    applyCameraPreset(insideMode);
-
-    ctx.setProgress(null);
+    const stats = analyzeSplatScene(activeSplat, ctx.meta.name);
+    let motionIdx = Math.max(0, MOTION_MODES.findIndex((m) => m.mode === stats.mode));
+    let insideMode = stats.mode === 'push';
 
     const resize = () => {
       const r = ctx.container.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) {
         renderer.setSize(r.width, r.height);
+        updateCameraFocalLength(renderer, camera, r.width, r.height, insideMode ? 0.56 : 0.82);
       }
     };
+
+    const applyCameraPreset = (inside: boolean) => {
+      insideMode = inside;
+      controls.dispose();
+      controls = inside
+        ? new SPLAT.OrbitControls(camera, canvas, -0.35, 0.12, stats.idealRadius, true, stats.target)
+        : new SPLAT.OrbitControls(camera, canvas, 0.45, 0.28, Math.max(2.6, stats.idealRadius), true, stats.target);
+      resize();
+    };
+    applyCameraPreset(insideMode);
+
+    ctx.setProgress(null);
+
     const ro = new ResizeObserver(resize);
     ro.observe(ctx.container);
-    resize();
 
     let autoPlay = false;
     let animPhase = 0;
@@ -320,17 +418,20 @@ export const gsplatViewer: ViewerPlugin = {
       thumbBtnLabel = `⏳ Recording ${mode.toUpperCase()}…`;
       renderToolbar();
 
-      // Snapshot user's current spherical camera pose relative to origin
       const p = camera.position;
-      const baseRadius = Math.max(0.5, Math.hypot(p.x, p.y, p.z));
-      const baseBeta = Math.asin(Math.max(-0.98, Math.min(0.98, -p.y / baseRadius)));
-      const baseAlpha = Math.atan2(p.x, -p.z);
-      const target = new SPLAT.Vector3(0, 0, 0);
+      const dx = p.x - stats.target.x;
+      const dy = p.y - stats.target.y;
+      const dz = p.z - stats.target.z;
+      const baseRadius = Math.max(0.4, Math.hypot(dx, dy, dz));
+      const baseBeta = Math.asin(Math.max(-0.98, Math.min(0.98, -dy / baseRadius)));
+      const baseAlpha = Math.atan2(dx, -dz);
 
-      // Small offscreen canvas to scale down each captured frame cleanly
+      const prevDamp = controls.dampening;
+      controls.dampening = 1.0;
+
       const thumbCanvas = document.createElement('canvas');
-      thumbCanvas.width = 280;
-      thumbCanvas.height = 280;
+      thumbCanvas.width = 300;
+      thumbCanvas.height = 300;
       const tctx = thumbCanvas.getContext('2d')!;
 
       const numFrames = 16;
@@ -338,25 +439,28 @@ export const gsplatViewer: ViewerPlugin = {
       for (let f = 0; f < numFrames; f++) {
         if (ctx.signal.aborted) break;
         const t = f / numFrames;
-        applyCameraMotion(camera, controls, baseAlpha, baseBeta, baseRadius, target, mode, t);
+        applyCameraMotion(camera, controls, baseAlpha, baseBeta, baseRadius, stats.target, mode, t);
         renderer.render(scene, camera);
-        await new Promise((r) => setTimeout(r, 45));
+        await new Promise((r) => setTimeout(r, 50));
         renderer.render(scene, camera);
 
-        // Center-crop square from live WebGL2 canvas
         const sw = Math.min(canvas.width, canvas.height);
         const sx = (canvas.width - sw) / 2;
         const sy = (canvas.height - sw) / 2;
-        tctx.drawImage(canvas, sx, sy, sw, sw, 0, 0, 280, 280);
-        frames.push(thumbCanvas.toDataURL('image/webp', 0.82));
+        tctx.fillStyle = '#181a22';
+        tctx.fillRect(0, 0, 300, 300);
+        tctx.filter = 'brightness(1.18) contrast(1.06) saturate(1.06)';
+        tctx.drawImage(canvas, sx, sy, sw, sw, 0, 0, 300, 300);
+        tctx.filter = 'none';
+        frames.push(thumbCanvas.toDataURL('image/webp', 0.85));
       }
 
-      // Restore user's starting camera pose
-      applyCameraMotion(camera, controls, baseAlpha, baseBeta, baseRadius, target, 'orbit', 0);
+      applyCameraMotion(camera, controls, baseAlpha, baseBeta, baseRadius, stats.target, 'orbit', 0.5);
+      controls.dampening = prevDamp;
 
       if (frames.length > 0) {
         const payload: AnimatedSplatPreview = {
-          kind: 'acv-anim-v2',
+          kind: 'acv-anim-v3',
           mode,
           pingPong: true,
           poster: frames[0],
@@ -414,7 +518,7 @@ export const gsplatViewer: ViewerPlugin = {
         const streamed = await streamAndDecimateSplatResponse(fakeRes, {
           ext: fileExt,
           totalBytes: file.size,
-          maxSplats: 600_000,
+          maxSplats: 800_000,
           signal: ctx.signal,
           onProgress: (loaded, total, kept) => {
             const pct = total ? (loaded / total) * 95 : 50;
@@ -461,7 +565,7 @@ export const gsplatViewer: ViewerPlugin = {
         {
           id: 'decimate-50',
           label: '✂ -50%',
-          title: 'Prune the least-visible 50% of splats in-place (by opacity × volume)',
+          title: 'Prune the least-visible 50% of splats in-place (by disk area × opacity²)',
           onClick: decimate50Percent,
         },
         {
@@ -524,27 +628,24 @@ export const gsplatViewer: ViewerPlugin = {
           animPhase = (animPhase + 0.0018) % 1;
           const mode = MOTION_MODES[motionIdx].mode;
           const t = 0.5 - 0.5 * Math.cos(animPhase * Math.PI * 2);
-          applyCameraMotion(camera, controls, 0.5, 0.32, 4.0, new SPLAT.Vector3(0, 0, 0), mode, t);
+          applyCameraMotion(
+            camera,
+            controls,
+            insideMode ? -0.35 : 0.45,
+            insideMode ? 0.12 : 0.28,
+            stats.idealRadius,
+            stats.target,
+            mode,
+            t,
+          );
         } else {
           controls.update();
         }
         renderer.render(scene, camera);
         totalFrames++;
-        // Auto-save a static poster thumbnail for huge files on frame 90 so Card View has a preview
         if (!autoSavedThumb && totalFrames === 90) {
           autoSavedThumb = true;
-          try {
-            const thumbCanvas = document.createElement('canvas');
-            thumbCanvas.width = 280;
-            thumbCanvas.height = 280;
-            const sw = Math.min(canvas.width, canvas.height);
-            thumbCanvas
-              .getContext('2d')!
-              .drawImage(canvas, (canvas.width - sw) / 2, (canvas.height - sw) / 2, sw, sw, 0, 0, 280, 280);
-            ctx.saveCardThumbnail(thumbCanvas.toDataURL('image/webp', 0.85)).catch(() => {});
-          } catch {
-            /* ignore */
-          }
+          captureAnimatedCardPreview().catch(() => {});
         }
       }
 
