@@ -1,6 +1,7 @@
 import type { AuthSnapshot } from '../bridge';
 import { getMetadata, fetchArrayBufferWithProgress, getSignedVideoUrl, type AssetMeta } from '../assets-api';
 import { pickViewer, type ViewerPlugin } from '../viewers';
+import type { AnimatedSplatPreview } from '../viewers/gsplat';
 import { getThumbnail, saveThumbnail, THUMB_UPDATED_EVENT } from './store';
 
 const CARD_ROW_SELECTOR = 'div[role="row"][data-key^="urn:aaid:aem:"]';
@@ -13,7 +14,7 @@ let queueChain: Promise<void> = Promise.resolve();
 
 type CachedScrubStrip = {
   duration: number;
-  frames: string[]; // Array of compact WebP data URLs
+  frames: string[];
 };
 
 function browseFolderFromHash(): string | null {
@@ -30,6 +31,16 @@ function formatTime(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function parseAnimatedPreview(raw: string | null): AnimatedSplatPreview | null {
+  if (!raw || !raw.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.kind === 'acv-anim-v1' && Array.isArray(parsed.frames) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function generateScrubStrip(videoUrl: string): Promise<CachedScrubStrip | null> {
@@ -102,7 +113,6 @@ function attachVideoHoverScrub(
   let seeking = false;
   let pendingPct: number | null = null;
 
-  // Check IndexedDB cache upfront so we can mark badge if already cached
   getThumbnail(scrubCacheKeys).then((raw) => {
     if (raw) {
       try {
@@ -171,7 +181,6 @@ function attachVideoHoverScrub(
     const signedUrl = await urlPromise;
     if (!video.src) video.src = signedUrl;
 
-    // Build and persist 24-frame scrub strip in IndexedDB in the background once
     if (!stripBuilding) {
       stripBuilding = true;
       generateScrubStrip(signedUrl)
@@ -194,7 +203,6 @@ function attachVideoHoverScrub(
     const clamped = Math.max(0, Math.min(0.999, pct));
     if (fillBar) fillBar.style.width = `${(clamped * 100).toFixed(1)}%`;
 
-    // Fast path: cached 24-frame WebP strip from IndexedDB (0 network, 0 decode lag)
     if (strip && frameImg) {
       const idx = Math.min(strip.frames.length - 1, Math.floor(clamped * strip.frames.length));
       frameImg.src = strip.frames[idx];
@@ -204,7 +212,6 @@ function attachVideoHoverScrub(
       return;
     }
 
-    // Fallback while strip is building on first hover: live <video> seek
     if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
     const targetSec = clamped * video.duration;
     if (timePill) timePill.textContent = `${formatTime(targetSec)} / ${formatTime(video.duration)}`;
@@ -236,13 +243,14 @@ function attachVideoHoverScrub(
 }
 
 function mountCardPreview(
+  row: HTMLElement,
   previewSlot: HTMLElement,
   descSlot: HTMLElement | null,
   plugin: ViewerPlugin,
   name: string,
-  dataUrl: string | null,
+  rawPayload: string | null,
 ) {
-  const stateKey = dataUrl ? `ready:${dataUrl.length}` : `loading:${plugin.id}`;
+  const stateKey = rawPayload ? `ready:${rawPayload.length}` : `loading:${plugin.id}`;
   let wrap = previewSlot.querySelector<HTMLElement>('[data-acv-card-thumb]');
   if (wrap && wrap.getAttribute('data-acv-state') === stateKey) return;
 
@@ -264,12 +272,61 @@ function mountCardPreview(
   }
   wrap.setAttribute('data-acv-state', stateKey);
 
-  const badgeHtml = `<span style="position:absolute;top:10px;left:10px;padding:2px 7px;border-radius:4px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font:700 10px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:2">${plugin.badge}</span>`;
+  // Clean up any previous animation timer on this card
+  if ((wrap as any).__acvTimer) {
+    clearInterval((wrap as any).__acvTimer);
+    (wrap as any).__acvTimer = null;
+  }
 
-  if (dataUrl) {
-    wrap.innerHTML = `${badgeHtml}<img src="${dataUrl}" alt="${name}" style="width:100%;height:100%;object-fit:cover;display:block" />`;
+  const anim = parseAnimatedPreview(rawPayload);
+  const badgeText = anim ? `${plugin.badge} · ${anim.mode.toUpperCase()}` : plugin.badge;
+  const badgeHtml = `<span style="position:absolute;top:10px;left:10px;padding:2px 7px;border-radius:4px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font:700 10px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:2">${badgeText}</span>`;
+
+  if (anim && anim.frames.length > 0) {
+    wrap.innerHTML = `${badgeHtml}<img src="${anim.poster}" alt="${name}" style="width:100%;height:100%;object-fit:cover;display:block" />`;
+    const img = wrap.querySelector<HTMLImageElement>('img')!;
+    let tick = 0;
+    let hovering = false;
+
+    // Build ping-pong or loop index sequence
+    const seq: number[] = [];
+    for (let i = 0; i < anim.frames.length; i++) seq.push(i);
+    if (anim.pingPong && anim.frames.length > 2) {
+      for (let i = anim.frames.length - 2; i >= 1; i--) seq.push(i);
+    }
+
+    // Continuous smooth animation loop (90ms per frame = ~11fps turntable/push)
+    (wrap as any).__acvTimer = setInterval(() => {
+      if (!wrap!.isConnected) {
+        clearInterval((wrap as any).__acvTimer);
+        return;
+      }
+      if (hovering) return;
+      tick = (tick + 1) % seq.length;
+      img.src = anim.frames[seq[tick]];
+    }, 90);
+
+    // Also allow interactive horizontal mouse scrubbing on hover
+    if (!(row as any).__acvAnimBound) {
+      (row as any).__acvAnimBound = true;
+      row.addEventListener('mouseenter', () => {
+        hovering = true;
+      });
+      row.addEventListener('mousemove', (e: MouseEvent) => {
+        const r = previewSlot.getBoundingClientRect();
+        if (r.width <= 0) return;
+        const pct = Math.max(0, Math.min(0.999, (e.clientX - r.left) / r.width));
+        const idx = Math.floor(pct * anim.frames.length);
+        img.src = anim.frames[idx];
+      });
+      row.addEventListener('mouseleave', () => {
+        hovering = false;
+      });
+    }
+  } else if (rawPayload) {
+    wrap.innerHTML = `${badgeHtml}<img src="${rawPayload}" alt="${name}" style="width:100%;height:100%;object-fit:cover;display:block" />`;
   } else {
-    wrap.innerHTML = `${badgeHtml}<div style="color:#a1a1aa;font:500 11px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;text-align:center;padding:12px">Rendering ${plugin.badge} preview…</div>`;
+    wrap.innerHTML = `${badgeHtml}<div style="color:#a1a1aa;font:500 11px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;text-align:center;padding:12px">Rendering animated ${plugin.badge} preview…</div>`;
   }
 }
 
@@ -290,22 +347,24 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
     return;
   }
 
-  // 2. Custom Plugin Thumbnails (3DGS, Audio Waveform, etc.)
+  // 2. Custom Plugin Thumbnails (Animated 3DGS, Audio Waveform, etc.)
   const pseudoMeta: AssetMeta = { id: assetId, damPath, name, mime: '' };
   const plugin = pickViewer(pseudoMeta);
   if (!plugin) return;
 
   const keys = [assetId, damPath, name].filter(Boolean);
   const cached = await getThumbnail(keys);
-  if (cached) {
-    mountCardPreview(previewSlot, descSlot, plugin, name, cached);
+  // Upgrade old static single-image 3DGS thumbnails to animated 16-frame loops automatically
+  const isLegacyStaticSplat = plugin.id === 'gsplat' && cached && !cached.startsWith('{');
+  if (cached && !isLegacyStaticSplat) {
+    mountCardPreview(row, previewSlot, descSlot, plugin, name, cached);
     return;
   }
 
   const lockKey = assetId || damPath;
   if (!plugin.renderThumbnail || inFlight.has(lockKey) || failed.has(lockKey)) return;
 
-  mountCardPreview(previewSlot, descSlot, plugin, name, null);
+  mountCardPreview(row, previewSlot, descSlot, plugin, name, null);
   inFlight.add(lockKey);
 
   queueChain = queueChain
@@ -320,7 +379,7 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
       if (rendered) {
         await saveThumbnail([meta.id, meta.damPath, meta.name, assetId], rendered);
         if (previewSlot.isConnected) {
-          mountCardPreview(previewSlot, descSlot, plugin, name, rendered);
+          mountCardPreview(row, previewSlot, descSlot, plugin, name, rendered);
         }
       } else {
         failed.add(lockKey);
