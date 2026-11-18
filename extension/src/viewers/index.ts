@@ -1,16 +1,22 @@
 import type { AssetMeta } from '../assets-api';
 import type { ViewerPlugin } from './types';
 import { gsplatViewer } from './gsplat';
+import { model3dViewer } from './model3d';
+import { fontViewer } from './font';
+import { rawImageViewer } from './raw';
 import { audioSpectrumViewer } from './audio';
 
 export type { ViewerPlugin, ViewerContext, ViewerToolbarAction } from './types';
 
 /**
  * Central Viewer Platform Registry.
- * Add new proprietary format plugins here (e.g. CAD/STEP, USDZ, VDB, Parquet, DICOM).
+ * Each plugin handles both the interactive Details Viewer and headless Card View thumbnails.
  */
 export const VIEWER_PLUGINS: readonly ViewerPlugin[] = [
   gsplatViewer,
+  model3dViewer,
+  fontViewer,
+  rawImageViewer,
   audioSpectrumViewer,
 ];
 

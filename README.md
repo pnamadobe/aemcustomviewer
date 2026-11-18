@@ -4,11 +4,14 @@ A Chrome Manifest V3 extension platform that injects interactive, high-performan
 
 ## Built-in Viewer Plugins
 
-| Plugin | Badge | Extensions | Renderer |
+| Plugin | Badge | Extensions | Details Viewer & Card View Thumbnail |
 |---|---|---|---|
-| **3D Gaussian Splatting** (`src/viewers/gsplat`) | `3DGS` | `.splat`, `.ply`, `.splatv` | WebGL2 (`gsplat`) with orbit/pan/zoom/WASD controls, turntable auto-rotate, background switcher, live splat count + FPS HUD, and `.splat` export |
-| **Audio Spectrum & Waveform** (`src/viewers/audio`) | `AUDIO` | `.mp3`, `.wav`, `.flac`, `.ogg` | WebAudio FFT spectrum analyzer + HTML5 audio transport |
-| **Reference Placeholder** (`src/viewers/placeholder`) | `CUSTOM` | `.xyz` | Minimal template for adding new proprietary format plugins |
+| **3D Gaussian Splatting** (`src/viewers/gsplat`) | `3DGS` | `.splat`, `.ply`, `.splatv` | **Card View**: 16-frame slow-drift WebP preview (auto-detects `ORBIT` for objects vs `PUSH`/`PAN` for scenes).<br>**Details**: WebGL2 viewer (`gsplat`) with orbit/pan/zoom/WASD, motion preview, background switcher, and animated preview recorder. |
+| **3D Models & CAD Meshes** (`src/viewers/model3d`) | `3D` | `.glb`, `.gltf`, `.obj`, `.stl` | **Card View**: 16-frame studio-lit PBR slow-drift preview.<br>**Details**: Three.js PBR studio (`RoomEnvironment`), PBR/Clay/Normals shading switcher, Wireframe toggle, Grid toggle, GLTF animation transport, and poly/vertex telemetry. |
+| **Fonts & Variable Fonts** (`src/viewers/font`) | `FONT` | `.ttf`, `.otf`, `.woff`, `.woff2` | **Card View**: Typography specimen card (`"Aa"`, alphabet, glyph count & Variable Font axes).<br>**Details**: Live editable type tester, interactive **Variable Font axis sliders** (`fvar` table: `wght`, `wdth`, `opsz`, `slnt`), Size Waterfall (`14px`–`56px`), Glyph Map grid, and Dark/Paper theme. |
+| **Camera RAW & 32-bit HDR** (`src/viewers/raw`) | `RAW` | `.cr3`, `.cr2`, `.nef`, `.arw`, `.dng`, `.raf`, `.rw2`, `.orf`, `.pef`, `.srw`, `.iiq`, `.3fr`, `.hdr`, `.exr` | **Card View**: Instant embedded full-res RAW preview extractor & ACES Filmic tone-mapped HDR card.<br>**Details**: Darkroom inspector with **Exposure (`-3` to `+3 EV`) slider**, live **RGB Parade Histogram**, Camera EXIF detection, and 1:1 Loupe zoom. |
+| **Audio Spectrum & Waveform** (`src/viewers/audio`) | `AUDIO` | `.mp3`, `.wav`, `.flac`, `.ogg` | **Card View**: 64-bar stereo waveform card.<br>**Details**: Real-time WebAudio FFT spectrum analyzer + HTML5 audio transport. |
+| **Video Hover-Scrubbing** (`src/thumbnails/card-observer`) | `⇄ SCRUB` | `.mp4`, `.mov`, `.webm`, `.m4v`, `.ogv` | **Card View**: Streams `cq5dam.preview.mp4` on first hover and caches a **24-frame WebP scrub strip** in `IndexedDB` for instant 0-network horizontal mouse scrubbing with timestamp HUD. |
 
 ## How It Works
 
