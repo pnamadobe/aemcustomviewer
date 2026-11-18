@@ -145,7 +145,7 @@ export const model3dViewer: ViewerPlugin = {
 
     renderer.dispose();
     const payload: AnimatedSplatPreview = {
-      kind: 'acv-anim-v3',
+      kind: 'acv-anim-v4',
       mode: 'orbit',
       pingPong: true,
       poster: frames[0],
@@ -259,7 +259,7 @@ export const model3dViewer: ViewerPlugin = {
       controls.update();
 
       const payload: AnimatedSplatPreview = {
-        kind: 'acv-anim-v3',
+        kind: 'acv-anim-v4',
         mode: 'orbit',
         pingPong: true,
         poster: frames[0],

@@ -37,7 +37,7 @@ function parseAnimatedPreview(raw: string | null): AnimatedSplatPreview | null {
   if (!raw || !raw.startsWith('{')) return null;
   try {
     const parsed = JSON.parse(raw);
-    return parsed?.kind === 'acv-anim-v3' && Array.isArray(parsed.frames) ? parsed : null;
+    return parsed?.kind === 'acv-anim-v4' && Array.isArray(parsed.frames) ? parsed : null;
   } catch {
     return null;
   }
@@ -284,13 +284,16 @@ function mountCardPreview(
   const badgeHtml = `<span style="position:absolute;top:14px;left:44px;padding:2px 7px;border-radius:4px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font:700 10px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:2">${badgeText}</span>`;
 
   if (anim && anim.frames.length > 0) {
+    // Flicker-free double-buffered compositor:
+    // The base layer stays at opacity: 1.0 permanently so the dark card background can NEVER bleed through.
+    // The overlay layer pre-decodes the next frame, fades 0 -> 1, then copies to base and resets to 0.
     wrap.innerHTML = `${badgeHtml}
-      <img class="acv-layer-a" src="${anim.poster}" alt="${name}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;transition:opacity 340ms ease-in-out;opacity:1" />
-      <img class="acv-layer-b" src="${anim.poster}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;transition:opacity 340ms ease-in-out;opacity:0" />`;
-    const imgA = wrap.querySelector<HTMLImageElement>('.acv-layer-a')!;
-    const imgB = wrap.querySelector<HTMLImageElement>('.acv-layer-b')!;
-    let showingA = true;
+      <img class="acv-layer-base" src="${anim.poster}" alt="${name}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;opacity:1" />
+      <img class="acv-layer-top" src="${anim.poster}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;transition:opacity 300ms linear;opacity:0" />`;
+    const baseImg = wrap.querySelector<HTMLImageElement>('.acv-layer-base')!;
+    const topImg = wrap.querySelector<HTMLImageElement>('.acv-layer-top')!;
     let hovering = false;
+    let transitioning = false;
 
     const seq: number[] = [];
     for (let i = 0; i < anim.frames.length; i++) seq.push(i);
@@ -298,51 +301,52 @@ function mountCardPreview(
       for (let i = anim.frames.length - 2; i >= 1; i--) seq.push(i);
     }
 
-    // Stagger starting phase per card so 30 cards don't move in lockstep
     let tick = Math.floor(Math.random() * seq.length);
 
-    // Slow, ambient "living photo" drift (~12s full cycle, 380ms per crossfaded step)
-    (wrap as any).__acvTimer = setInterval(() => {
+    (wrap as any).__acvTimer = setInterval(async () => {
       if (!wrap!.isConnected) {
         clearInterval((wrap as any).__acvTimer);
         return;
       }
-      if (hovering) return;
+      if (hovering || transitioning) return;
+      transitioning = true;
       tick = (tick + 1) % seq.length;
       const nextSrc = anim.frames[seq[tick]];
-      if (showingA) {
-        imgB.src = nextSrc;
-        imgB.style.opacity = '1';
-        imgA.style.opacity = '0';
-      } else {
-        imgA.src = nextSrc;
-        imgA.style.opacity = '1';
-        imgB.style.opacity = '0';
+      try {
+        topImg.style.transition = 'none';
+        topImg.style.opacity = '0';
+        topImg.src = nextSrc;
+        if (topImg.decode) await topImg.decode().catch(() => {});
+        // Force style flush then fade overlay from 0 -> 1 over opaque base
+        void topImg.offsetWidth;
+        topImg.style.transition = 'opacity 300ms linear';
+        topImg.style.opacity = '1';
+        await new Promise((r) => setTimeout(r, 310));
+        if (!hovering && wrap!.isConnected) {
+          baseImg.src = nextSrc;
+          topImg.style.transition = 'none';
+          topImg.style.opacity = '0';
+        }
+      } finally {
+        transitioning = false;
       }
-      showingA = !showingA;
-    }, 380);
+    }, 420);
 
-    // On hover, let the user scrub directly with crisp instant frame response
     if (!(row as any).__acvAnimBound) {
       (row as any).__acvAnimBound = true;
       row.addEventListener('mouseenter', () => {
         hovering = true;
+        topImg.style.transition = 'none';
+        topImg.style.opacity = '0';
       });
       row.addEventListener('mousemove', (e: MouseEvent) => {
         const r = previewSlot.getBoundingClientRect();
         if (r.width <= 0) return;
         const pct = Math.max(0, Math.min(0.999, (e.clientX - r.left) / r.width));
         const idx = Math.floor(pct * anim.frames.length);
-        imgA.style.transition = 'none';
-        imgB.style.transition = 'none';
-        imgA.src = anim.frames[idx];
-        imgA.style.opacity = '1';
-        imgB.style.opacity = '0';
-        showingA = true;
+        baseImg.src = anim.frames[idx];
       });
       row.addEventListener('mouseleave', () => {
-        imgA.style.transition = 'opacity 340ms ease-in-out';
-        imgB.style.transition = 'opacity 340ms ease-in-out';
         hovering = false;
       });
     }
