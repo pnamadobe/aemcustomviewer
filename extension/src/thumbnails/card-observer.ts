@@ -5,10 +5,16 @@ import { getThumbnail, saveThumbnail, THUMB_UPDATED_EVENT } from './store';
 
 const CARD_ROW_SELECTOR = 'div[role="row"][data-key^="urn:aaid:aem:"]';
 const VIDEO_EXTS = new Set(['mp4', 'mov', 'webm', 'm4v', 'ogv']);
+const SCRUB_FRAMES = 24;
 const inFlight = new Set<string>();
 const failed = new Set<string>();
 const signedVideoCache = new Map<string, Promise<string>>();
 let queueChain: Promise<void> = Promise.resolve();
+
+type CachedScrubStrip = {
+  duration: number;
+  frames: string[]; // Array of compact WebP data URLs
+};
 
 function browseFolderFromHash(): string | null {
   const m = location.hash.match(/#\/(?:browse|assets\/browse)(\/content\/dam\/[^?#]*)/i);
@@ -26,9 +32,51 @@ function formatTime(sec: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+async function generateScrubStrip(videoUrl: string): Promise<CachedScrubStrip | null> {
+  const v = document.createElement('video');
+  v.muted = true;
+  v.playsInline = true;
+  v.preload = 'auto';
+  v.crossOrigin = 'anonymous';
+  v.src = videoUrl;
+
+  await new Promise<void>((res, rej) => {
+    v.onloadedmetadata = () => res();
+    v.onerror = () => rej(new Error('video metadata error'));
+  });
+
+  const duration = v.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+
+  const h = 220;
+  const w = Math.max(160, Math.round((v.videoWidth / (v.videoHeight || 1)) * h) || 320);
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+
+  const frames: string[] = [];
+  for (let i = 0; i < SCRUB_FRAMES; i++) {
+    const t = ((i + 0.5) / SCRUB_FRAMES) * duration;
+    v.currentTime = t;
+    await new Promise<void>((res) => {
+      const onSeek = () => {
+        v.removeEventListener('seeked', onSeek);
+        res();
+      };
+      v.addEventListener('seeked', onSeek);
+    });
+    ctx.drawImage(v, 0, 0, w, h);
+    frames.push(canvas.toDataURL('image/webp', 0.72));
+  }
+  v.src = '';
+  return { duration, frames };
+}
+
 function attachVideoHoverScrub(
   row: HTMLElement,
   previewSlot: HTMLElement,
+  assetId: string,
   damPath: string,
   getAuth: () => AuthSnapshot | null,
 ) {
@@ -36,7 +84,8 @@ function attachVideoHoverScrub(
   previewSlot.setAttribute('data-acv-video-scrub', '1');
   previewSlot.style.position = 'relative';
 
-  // Subtle SCRUB badge in top-left so user knows hover-scrubbing is active
+  const scrubCacheKeys = [`scrub:${assetId}`, `scrub:${damPath}`].filter((k) => k !== 'scrub:');
+
   const hintBadge = document.createElement('span');
   hintBadge.textContent = '⇄ SCRUB';
   hintBadge.style.cssText =
@@ -44,64 +93,118 @@ function attachVideoHoverScrub(
   previewSlot.appendChild(hintBadge);
 
   let scrubWrap: HTMLElement | null = null;
+  let frameImg: HTMLImageElement | null = null;
   let video: HTMLVideoElement | null = null;
   let fillBar: HTMLElement | null = null;
   let timePill: HTMLElement | null = null;
+  let strip: CachedScrubStrip | null = null;
+  let stripBuilding = false;
   let seeking = false;
   let pendingPct: number | null = null;
 
-  const ensureVideo = async () => {
-    if (video) return video;
-    const auth = getAuth();
-    if (!auth) return null;
-
-    scrubWrap = document.createElement('div');
-    scrubWrap.setAttribute('data-acv-card-thumb', '');
-    scrubWrap.style.cssText =
-      'position:absolute;inset:0;display:none;background:#09090b;overflow:hidden;border-radius:inherit;pointer-events:none;z-index:3;';
-
-    video = document.createElement('video');
-    video.muted = true;
-    video.playsInline = true;
-    video.preload = 'metadata';
-    video.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;background:#09090b;';
-
-    timePill = document.createElement('span');
-    timePill.style.cssText =
-      'position:absolute;bottom:10px;right:10px;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,0.78);color:#fff;font:600 10px/1.3 ui-monospace,SFMono-Regular,monospace;z-index:4;';
-    timePill.textContent = '0:00';
-
-    const track = document.createElement('div');
-    track.style.cssText = 'position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,0.22);z-index:4;';
-    fillBar = document.createElement('div');
-    fillBar.style.cssText = 'height:100%;width:0%;background:linear-gradient(90deg,#3b82f6,#ec4899);';
-    track.appendChild(fillBar);
-
-    scrubWrap.append(video, timePill, track);
-    previewSlot.appendChild(scrubWrap);
-
-    video.addEventListener('seeked', () => {
-      seeking = false;
-      if (pendingPct !== null && video && Number.isFinite(video.duration)) {
-        const p = pendingPct;
-        pendingPct = null;
-        seeking = true;
-        video.currentTime = p * video.duration;
+  // Check IndexedDB cache upfront so we can mark badge if already cached
+  getThumbnail(scrubCacheKeys).then((raw) => {
+    if (raw) {
+      try {
+        strip = JSON.parse(raw) as CachedScrubStrip;
+        hintBadge.textContent = '⇄ SCRUB · CACHED';
+      } catch {
+        /* ignore */
       }
-    });
+    }
+  });
 
+  const ensureUi = async () => {
+    if (!scrubWrap) {
+      scrubWrap = document.createElement('div');
+      scrubWrap.setAttribute('data-acv-card-thumb', '');
+      scrubWrap.style.cssText =
+        'position:absolute;inset:0;display:none;background:#09090b;overflow:hidden;border-radius:inherit;pointer-events:none;z-index:3;';
+
+      frameImg = document.createElement('img');
+      frameImg.style.cssText = 'width:100%;height:100%;object-fit:contain;display:none;background:#09090b;';
+
+      video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'metadata';
+      video.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;background:#09090b;';
+
+      timePill = document.createElement('span');
+      timePill.style.cssText =
+        'position:absolute;bottom:10px;right:10px;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,0.78);color:#fff;font:600 10px/1.3 ui-monospace,SFMono-Regular,monospace;z-index:4;';
+      timePill.textContent = '0:00';
+
+      const track = document.createElement('div');
+      track.style.cssText = 'position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,0.22);z-index:4;';
+      fillBar = document.createElement('div');
+      fillBar.style.cssText = 'height:100%;width:0%;background:linear-gradient(90deg,#3b82f6,#ec4899);';
+      track.appendChild(fillBar);
+
+      scrubWrap.append(frameImg, video, timePill, track);
+      previewSlot.appendChild(scrubWrap);
+
+      video.addEventListener('seeked', () => {
+        seeking = false;
+        if (pendingPct !== null && video && Number.isFinite(video.duration)) {
+          const p = pendingPct;
+          pendingPct = null;
+          seeking = true;
+          video.currentTime = p * video.duration;
+        }
+      });
+    }
+
+    if (strip) {
+      if (frameImg) frameImg.style.display = 'block';
+      if (video) video.style.display = 'none';
+      return;
+    }
+
+    const auth = getAuth();
+    if (!auth || !video) return;
     let urlPromise = signedVideoCache.get(damPath);
     if (!urlPromise) {
       urlPromise = getSignedVideoUrl(auth, damPath);
       signedVideoCache.set(damPath, urlPromise);
     }
-    video.src = await urlPromise;
-    return video;
+    const signedUrl = await urlPromise;
+    if (!video.src) video.src = signedUrl;
+
+    // Build and persist 24-frame scrub strip in IndexedDB in the background once
+    if (!stripBuilding) {
+      stripBuilding = true;
+      generateScrubStrip(signedUrl)
+        .then(async (built) => {
+          if (built && built.frames.length > 0) {
+            strip = built;
+            hintBadge.textContent = '⇄ SCRUB · CACHED';
+            await saveThumbnail(scrubCacheKeys, JSON.stringify(built));
+            if (frameImg && video) {
+              frameImg.style.display = 'block';
+              video.style.display = 'none';
+            }
+          }
+        })
+        .catch(() => {});
+    }
   };
 
   const seekToPct = (pct: number) => {
-    const clamped = Math.max(0, Math.min(0.995, pct));
+    const clamped = Math.max(0, Math.min(0.999, pct));
     if (fillBar) fillBar.style.width = `${(clamped * 100).toFixed(1)}%`;
+
+    // Fast path: cached 24-frame WebP strip from IndexedDB (0 network, 0 decode lag)
+    if (strip && frameImg) {
+      const idx = Math.min(strip.frames.length - 1, Math.floor(clamped * strip.frames.length));
+      frameImg.src = strip.frames[idx];
+      if (timePill) {
+        timePill.textContent = `${formatTime(clamped * strip.duration)} / ${formatTime(strip.duration)}`;
+      }
+      return;
+    }
+
+    // Fallback while strip is building on first hover: live <video> seek
     if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
     const targetSec = clamped * video.duration;
     if (timePill) timePill.textContent = `${formatTime(targetSec)} / ${formatTime(video.duration)}`;
@@ -114,10 +217,8 @@ function attachVideoHoverScrub(
   };
 
   row.addEventListener('mouseenter', async () => {
-    const v = await ensureVideo();
-    if (v && scrubWrap) {
-      scrubWrap.style.display = 'block';
-    }
+    await ensureUi();
+    if (scrubWrap) scrubWrap.style.display = 'block';
   });
 
   row.addEventListener('mousemove', (e: MouseEvent) => {
@@ -185,7 +286,7 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
 
   // 1. Video Hover-Scrubbing for MP4/MOV/WebM cards
   if (VIDEO_EXTS.has(extOf(name)) && folder) {
-    attachVideoHoverScrub(row, previewSlot, damPath, getAuth);
+    attachVideoHoverScrub(row, previewSlot, assetId, damPath, getAuth);
     return;
   }
 
