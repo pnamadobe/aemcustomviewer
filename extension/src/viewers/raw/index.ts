@@ -179,24 +179,78 @@ function drawHistogram(source: HTMLCanvasElement, target: HTMLCanvasElement) {
   drawChannel(bBins, 'rgba(59, 130, 246, 0.75)');
 }
 
+/**
+ * Formats that AEM as a Cloud Service does NOT support natively at all
+ * (32-bit float HDR/EXR, Cinema RAW, and camera formats omitted from AEM's ACR table).
+ */
+export const UNSUPPORTED_BY_AEM_RAW_EXTS = [
+  'hdr',
+  'exr',
+  'crm',
+  'braw',
+  'r3d',
+  'ari',
+  'bay',
+  'cap',
+  'eip',
+  'dcs',
+  'drf',
+  'mdc',
+  'ptx',
+  'rwz',
+] as const;
+
+/**
+ * Still-camera RAW formats listed in AEM's Adobe Camera Raw support table.
+ * For these extensions, our plugin ONLY activates as a fallback when AEM failed
+ * to generate a native rendition (`meta.hasNativeRendition === false`), e.g. for
+ * brand-new camera bodies or unsupported lossless/high-efficiency compression modes.
+ */
+export const AEM_ACR_FALLBACK_RAW_EXTS = [
+  'cr3',
+  'cr2',
+  'crw',
+  'nef',
+  'nrw',
+  'arw',
+  'srf',
+  'srw',
+  'dng',
+  'raf',
+  'rw2',
+  'rwl',
+  'orf',
+  'pef',
+  'iiq',
+  '3fr',
+  'dcr',
+  'erf',
+  'fff',
+  'gpr',
+  'kdc',
+  'mef',
+  'mfw',
+  'mos',
+  'mrw',
+  'raw',
+  'x3f',
+] as const;
+
+const ALWAYS_SET = new Set<string>(UNSUPPORTED_BY_AEM_RAW_EXTS);
+const FALLBACK_SET = new Set<string>(AEM_ACR_FALLBACK_RAW_EXTS);
+
 export const rawImageViewer: ViewerPlugin = {
   id: 'raw-image',
   label: 'Camera RAW & HDR',
   badge: 'RAW',
-  extensions: ['cr3', 'cr2', 'nef', 'arw', 'dng', 'raf', 'rw2', 'orf', 'pef', 'srw', 'iiq', '3fr', 'hdr', 'exr'],
-  mimeTypes: [
-    'image/x-canon-cr3',
-    'image/x-canon-cr2',
-    'image/x-nikon-nef',
-    'image/x-sony-arw',
-    'image/x-adobe-dng',
-    'image/x-fuji-raf',
-    'image/x-panasonic-rw2',
-    'image/x-olympus-orf',
-    'image/x-pentax-pef',
-    'image/vnd.radiance',
-    'image/x-exr',
-  ],
+  extensions: [...UNSUPPORTED_BY_AEM_RAW_EXTS],
+  mimeTypes: ['image/vnd.radiance', 'image/x-exr'],
+  match(meta) {
+    const ext = extOf(meta.name || meta.damPath);
+    if (ALWAYS_SET.has(ext)) return true;
+    if (FALLBACK_SET.has(ext) && meta.hasNativeRendition === false) return true;
+    return false;
+  },
 
   async renderThumbnail(meta, fetchBuffer) {
     const ext = extOf(meta.name);

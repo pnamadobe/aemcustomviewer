@@ -9,6 +9,7 @@ export type AssetMeta = {
   size?: number;
   primaryHref?: string;
   blockDownloadHref?: string;
+  hasNativeRendition?: boolean;
 };
 
 const buildHeaders = (a: AuthSnapshot, extra: Record<string, string> = {}) => ({
@@ -20,6 +21,15 @@ const buildHeaders = (a: AuthSnapshot, extra: Record<string, string> = {}) => ({
 
 function parseRepoJson(j: any, fallbackPath = ''): AssetMeta {
   const damPath = j['repo:path'] ?? fallbackPath;
+  const renditions = j._links?.['http://ns.adobe.com/adobecloud/rel/rendition'];
+  const hasNativeRendition =
+    Array.isArray(renditions) &&
+    renditions.some(
+      (r: any) =>
+        r?.['aem:renditionUsage'] === 'web' ||
+        r?.['aem:renditionUsage'] === 'thumbnail' ||
+        r?.['aem:isSystemDefault'] === true,
+    );
   return {
     id: j['repo:id'] ?? '',
     damPath,
@@ -28,6 +38,7 @@ function parseRepoJson(j: any, fallbackPath = ''): AssetMeta {
     size: Number(j['repo:size']) || undefined,
     primaryHref: j._links?.['http://ns.adobe.com/adobecloud/rel/primary']?.href,
     blockDownloadHref: j._links?.['http://ns.adobe.com/adobecloud/rel/download']?.href,
+    hasNativeRendition,
   };
 }
 

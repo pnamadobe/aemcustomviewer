@@ -430,7 +430,9 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
   }
 
   // 2. Custom Plugin Thumbnails (Animated 3DGS, 3D Mesh, Font, Camera RAW/HDR, Audio Waveform)
-  const pseudoMeta: AssetMeta = { id: assetId, damPath, name, mime: '' };
+  // Check if AEM already rendered a native thumbnail <img> in this card; if so, ACR-supported RAWs stay native.
+  const hasNativeCardImg = Boolean(previewSlot.querySelector('img:not([class^="acv-"])'));
+  const pseudoMeta: AssetMeta = { id: assetId, damPath, name, mime: '', hasNativeRendition: hasNativeCardImg };
   const plugin = pickViewer(pseudoMeta);
   if (!plugin) return;
 
