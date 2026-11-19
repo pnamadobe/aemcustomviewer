@@ -1,4 +1,4 @@
-const DB_NAME = 'acv-thumbnails-v1';
+const DB_NAME = 'acv-thumbnails-v2';
 const STORE_NAME = 'thumbs';
 export const THUMB_UPDATED_EVENT = 'acv:thumb-updated';
 

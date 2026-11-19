@@ -454,6 +454,30 @@ export const rawImageViewer: ViewerPlugin = {
 
     await redraw();
 
+    const saveOrientedThumb = async () => {
+      const thumb = document.createElement('canvas');
+      thumb.width = 360;
+      thumb.height = 360;
+      const sw = Math.min(displayCanvas.width, displayCanvas.height);
+      thumb
+        .getContext('2d')!
+        .drawImage(
+          displayCanvas,
+          (displayCanvas.width - sw) / 2,
+          (displayCanvas.height - sw) / 2,
+          sw,
+          sw,
+          0,
+          0,
+          360,
+          360,
+        );
+      await ctx.saveCardThumbnail(thumb.toDataURL('image/webp', 0.88));
+    };
+
+    // Auto-save properly oriented card thumbnail on open
+    saveOrientedThumb().catch(() => {});
+
     ctx.setActions([
       {
         id: 'rotate',
@@ -482,26 +506,7 @@ export const rawImageViewer: ViewerPlugin = {
       {
         id: 'thumb',
         label: '📷 Set Thumbnail',
-        onClick: async () => {
-          const thumb = document.createElement('canvas');
-          thumb.width = 360;
-          thumb.height = 360;
-          const sw = Math.min(displayCanvas.width, displayCanvas.height);
-          thumb
-            .getContext('2d')!
-            .drawImage(
-              displayCanvas,
-              (displayCanvas.width - sw) / 2,
-              (displayCanvas.height - sw) / 2,
-              sw,
-              sw,
-              0,
-              0,
-              360,
-              360,
-            );
-          await ctx.saveCardThumbnail(thumb.toDataURL('image/webp', 0.88));
-        },
+        onClick: saveOrientedThumb,
       },
     ]);
 

@@ -405,6 +405,7 @@ function mountCardPreview(
     }
   } else if (rawPayload) {
     const img = document.createElement('img');
+    img.className = 'acv-static-thumb';
     img.src = rawPayload;
     img.alt = name;
     img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block';
@@ -466,7 +467,10 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
     clearCardEnhancements(row);
     return;
   }
-  const hasNativeCardImg = Boolean(previewSlot.querySelector('img:not([class^="acv-"])'));
+  // Only count <img> elements outside our own [data-acv-card-thumb] overlay as native AEM thumbnails
+  const hasNativeCardImg = [...previewSlot.querySelectorAll('img')].some(
+    (img) => !img.closest('[data-acv-card-thumb]'),
+  );
   const pseudoMeta: AssetMeta = { id: assetId, damPath, name, mime: '', hasNativeRendition: hasNativeCardImg };
   const plugin = pickViewer(pseudoMeta);
   if (!plugin) {
