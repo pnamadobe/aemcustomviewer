@@ -3,10 +3,15 @@
   "name": "AEM Assets View – Custom Viewer",
   "version": "0.2.0",
   "description": "Renders proprietary, 3D, font, and RAW formats in the Assets View main preview area and Card View.",
+  "permissions": ["storage"],
   "host_permissions": [
     "https://experience.adobe.com/*",
     "https://*.adobeaemcloud.com/*"
   ],
+  "action": {
+    "default_title": "AEM Assets View – Custom Viewer",
+    "default_popup": "ui/popup.html"
+  },
   "content_scripts": [
     {
       "matches": [

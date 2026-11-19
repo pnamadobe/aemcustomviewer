@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 import type { ViewerPlugin } from '../types';
+import { getSettings } from '../../settings';
 
 function extOf(name: string): string {
   return name.split('.').pop()?.toLowerCase() ?? '';
@@ -246,9 +247,10 @@ export const rawImageViewer: ViewerPlugin = {
   extensions: [...UNSUPPORTED_BY_AEM_RAW_EXTS],
   mimeTypes: ['image/vnd.radiance', 'image/x-exr'],
   match(meta) {
+    const s = getSettings();
     const ext = extOf(meta.name || meta.damPath);
-    if (ALWAYS_SET.has(ext)) return true;
-    if (FALLBACK_SET.has(ext) && meta.hasNativeRendition === false) return true;
+    if (ALWAYS_SET.has(ext)) return s.formats.raw;
+    if (FALLBACK_SET.has(ext)) return s.formats.rawAcrFallback;
     return false;
   },
 

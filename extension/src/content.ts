@@ -1,11 +1,12 @@
 import { ASSETS_VIEW_FRAME, DEBUG } from './config';
 import { HANDSHAKE_EVENT, randomChannel, type AuthSnapshot, type BridgeMsg } from './bridge';
 import { readAuthFromSessionStorage } from './auth';
-import { watchRoute } from './router';
+import { getSettings, loadSettings, subscribeSettings } from './settings';
+import { watchRoute, damPathFromUrl } from './router';
 import { getMetadata, getOriginal, fetchArrayBufferWithProgress } from './assets-api';
 import { waitForPreview, mountOverlay, type Overlay } from './overlay';
 import { pickViewer } from './viewers';
-import { saveThumbnail } from './thumbnails/store';
+import { saveThumbnail, clearAllThumbnails } from './thumbnails/store';
 import { startCardThumbnailObserver } from './thumbnails/card-observer';
 
 const log = (...a: unknown[]) => DEBUG && console.debug('[acv]', ...a);
@@ -58,6 +59,9 @@ if (ASSETS_VIEW_FRAME(location)) {
 
   const open = async (damPath: string) => {
     teardown();
+    const settings = getSettings();
+    if (!settings.enabled || !settings.detailsViewer) return;
+
     const ctl = new AbortController();
     session = { ctl };
     const s = session;
@@ -65,7 +69,7 @@ if (ASSETS_VIEW_FRAME(location)) {
       const a = await getAuth(ctl.signal);
       const meta = await getMetadata(a, damPath, ctl.signal);
       const plugin = pickViewer(meta);
-      if (!plugin) return log('unsupported format, leaving native preview intact:', meta.mime, meta.name);
+      if (!plugin) return log('unsupported or disabled format, leaving native preview intact:', meta.mime, meta.name);
 
       const container = await waitForPreview(ctl.signal);
       const overlay = mountOverlay(container);
@@ -96,12 +100,26 @@ if (ASSETS_VIEW_FRAME(location)) {
     }
   };
 
-  const start = () => {
+  const start = async () => {
+    let lastClearedAt = (await loadSettings()).cacheClearedAt;
     const stopRoute = watchRoute((r) => (r.kind === 'details' ? open(r.damPath) : teardown()));
     const stopCards = startCardThumbnailObserver(currentSyncAuth);
+    const unsubSettings = subscribeSettings((next) => {
+      if (next.cacheClearedAt && next.cacheClearedAt !== lastClearedAt) {
+        lastClearedAt = next.cacheClearedAt;
+        clearAllThumbnails();
+      }
+      const curPath = damPathFromUrl();
+      if (!next.enabled || !next.detailsViewer) {
+        teardown();
+      } else if (curPath) {
+        open(curPath);
+      }
+    });
     (window as any).__acvDispose = () => {
       stopRoute();
       stopCards();
+      unsubSettings();
       teardown();
     };
   };

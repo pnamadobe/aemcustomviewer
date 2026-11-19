@@ -7,6 +7,7 @@ import {
   getSignedVideoUrl,
   type AssetMeta,
 } from '../assets-api';
+import { getSettings, subscribeSettings } from '../settings';
 import { pickViewer, type ViewerPlugin } from '../viewers';
 import type { AnimatedSplatPreview } from '../viewers/gsplat';
 import { getThumbnail, saveThumbnail, THUMB_UPDATED_EVENT } from './store';
@@ -302,8 +303,13 @@ function mountCardPreview(
 
   if (descSlot) {
     const spans = descSlot.querySelectorAll('span');
-    if (spans.length >= 2 && spans[1].textContent !== plugin.label) {
-      spans[1].textContent = plugin.label;
+    if (spans.length >= 2) {
+      if (!descSlot.hasAttribute('data-acv-orig-sub')) {
+        descSlot.setAttribute('data-acv-orig-sub', spans[1].textContent || '');
+      }
+      if (spans[1].textContent !== plugin.label) {
+        spans[1].textContent = plugin.label;
+      }
     }
   }
 
@@ -412,7 +418,29 @@ function mountCardPreview(
   }
 }
 
+function clearCardEnhancements(row: HTMLElement) {
+  row.querySelectorAll<HTMLElement>('[data-acv-card-thumb], [data-acv-scrub-badge]').forEach((el) => {
+    if ((el as any).__acvTimer) clearInterval((el as any).__acvTimer);
+    el.remove();
+  });
+  const previewSlot = row.querySelector<HTMLElement>('[slot="preview"]');
+  previewSlot?.removeAttribute('data-acv-video-scrub');
+  const descSlot = row.querySelector<HTMLElement>('[slot="description"]');
+  if (descSlot && descSlot.hasAttribute('data-acv-orig-sub')) {
+    const spans = descSlot.querySelectorAll('span');
+    if (spans.length >= 2) {
+      spans[1].textContent = descSlot.getAttribute('data-acv-orig-sub');
+    }
+  }
+}
+
 async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null) {
+  const settings = getSettings();
+  if (!settings.enabled) {
+    clearCardEnhancements(row);
+    return;
+  }
+
   const assetId = row.getAttribute('data-key') || '';
   const previewSlot = row.querySelector<HTMLElement>('[slot="preview"]');
   const descSlot = row.querySelector<HTMLElement>('[slot="description"]');
@@ -425,16 +453,26 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
 
   // 1. Video Hover-Scrubbing for MP4/MOV/WebM cards (works in Folders, Search Results, and Collections)
   if (VIDEO_EXTS.has(extOf(name)) && (folder || assetId)) {
+    if (!settings.videoHoverScrub) {
+      clearCardEnhancements(row);
+      return;
+    }
     attachVideoHoverScrub(row, previewSlot, assetId, name, getAuth);
     return;
   }
 
   // 2. Custom Plugin Thumbnails (Animated 3DGS, 3D Mesh, Font, Camera RAW/HDR, Audio Waveform)
-  // Check if AEM already rendered a native thumbnail <img> in this card; if so, ACR-supported RAWs stay native.
+  if (!settings.cardThumbnails) {
+    clearCardEnhancements(row);
+    return;
+  }
   const hasNativeCardImg = Boolean(previewSlot.querySelector('img:not([class^="acv-"])'));
   const pseudoMeta: AssetMeta = { id: assetId, damPath, name, mime: '', hasNativeRendition: hasNativeCardImg };
   const plugin = pickViewer(pseudoMeta);
-  if (!plugin) return;
+  if (!plugin) {
+    clearCardEnhancements(row);
+    return;
+  }
 
   const keys = [assetId, folder ? damPath : '', name].filter(Boolean);
   const cached = await getThumbnail(keys);
@@ -518,11 +556,16 @@ export function startCardThumbnailObserver(getAuth: () => AuthSnapshot | null): 
   mo.observe(document.documentElement, { childList: true, subtree: true });
 
   document.addEventListener(THUMB_UPDATED_EVENT, schedule);
+  const unsubSettings = subscribeSettings(() => {
+    failed.clear();
+    schedule();
+  });
   schedule();
 
   return () => {
     if (raf) cancelAnimationFrame(raf);
     mo.disconnect();
+    unsubSettings();
     document.removeEventListener(THUMB_UPDATED_EVENT, schedule);
   };
 }

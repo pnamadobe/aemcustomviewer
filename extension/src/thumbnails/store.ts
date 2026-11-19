@@ -64,3 +64,24 @@ export async function saveThumbnail(keys: string[], dataUrl: string): Promise<vo
   }
   document.dispatchEvent(new CustomEvent(THUMB_UPDATED_EVENT, { detail: { keys: valid, dataUrl } }));
 }
+
+export async function clearAllThumbnails(): Promise<void> {
+  memCache.clear();
+  try {
+    const db = await openDb();
+    await new Promise<void>((res) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).clear();
+      tx.oncomplete = () => res();
+      tx.onerror = () => res();
+    });
+  } catch {
+    /* ignore */
+  }
+  try {
+    indexedDB.deleteDatabase('acv-splat-cache-v3');
+  } catch {
+    /* ignore */
+  }
+  document.dispatchEvent(new CustomEvent(THUMB_UPDATED_EVENT, { detail: { cleared: true } }));
+}

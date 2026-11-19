@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AEM Custom Viewer</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      width: 300px;
+      padding: 14px 16px;
+      background: #14151a;
+      color: #f1f5f9;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Adobe Clean", "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 12px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .badge {
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      color: #fff;
+      font-size: 10px;
+      letter-spacing: 0.05em;
+    }
+    .section-title {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #94a3b8;
+      margin: 10px 0 6px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 0;
+      gap: 8px;
+    }
+    .row-label {
+      display: flex;
+      flex-direction: column;
+    }
+    .row-sub {
+      font-size: 10px;
+      color: #64748b;
+    }
+    input[type="checkbox"] {
+      appearance: none;
+      width: 34px;
+      height: 19px;
+      background: #334155;
+      border-radius: 999px;
+      position: relative;
+      cursor: pointer;
+      transition: background 0.15s;
+      flex-shrink: 0;
+    }
+    input[type="checkbox"]::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 15px;
+      height: 15px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.15s;
+    }
+    input[type="checkbox"]:checked {
+      background: #3b82f6;
+    }
+    input[type="checkbox"]:checked::after {
+      transform: translateX(15px);
+    }
+    .disabled-group {
+      opacity: 0.4;
+      pointer-events: none;
+    }
+    .footer {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    button {
+      width: 100%;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.06);
+      color: #e2e8f0;
+      font: inherit;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    button:hover {
+      background: rgba(255,255,255,0.12);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <span class="badge">ACV</span>
+      <span>AEM Custom Viewer</span>
+    </div>
+    <input type="checkbox" id="enabled" title="Master Enable / Disable" />
+  </div>
+
+  <div id="sub-controls">
+    <div class="section-title">Features</div>
+    <label class="row">
+      <div class="row-label">
+        <span>Details Page Viewer</span>
+        <span class="row-sub">Interactive main preview overlay</span>
+      </div>
+      <input type="checkbox" id="detailsViewer" />
+    </label>
+    <label class="row">
+      <div class="row-label">
+        <span>Card View Thumbnails</span>
+        <span class="row-sub">Animated 3D & custom format cards</span>
+      </div>
+      <input type="checkbox" id="cardThumbnails" />
+    </label>
+    <label class="row">
+      <div class="row-label">
+        <span>Video Hover-Scrub</span>
+        <span class="row-sub">24-frame scrub on MP4/MOV cards</span>
+      </div>
+      <input type="checkbox" id="videoHoverScrub" />
+    </label>
+
+    <div class="section-title">Formats</div>
+    <label class="row">
+      <div class="row-label">
+        <span>3D Gaussian Splats</span>
+        <span class="row-sub">.splat, .ply, .splatv</span>
+      </div>
+      <input type="checkbox" id="fmt-gsplat" />
+    </label>
+    <label class="row">
+      <div class="row-label">
+        <span>3D Models & Meshes</span>
+        <span class="row-sub">.glb, .gltf, .obj, .stl</span>
+      </div>
+      <input type="checkbox" id="fmt-model3d" />
+    </label>
+    <label class="row">
+      <div class="row-label">
+        <span>Fonts & Variable Fonts</span>
+        <span class="row-sub">.ttf, .otf, .woff, .woff2</span>
+      </div>
+      <input type="checkbox" id="fmt-font" />
+    </label>
+    <label class="row">
+      <div class="row-label">
+        <span>32-bit HDR & Cinema RAW</span>
+        <span class="row-sub">.hdr, .exr, .braw, .r3d, .crm, .ari</span>
+      </div>
+      <input type="checkbox" id="fmt-raw" />
+    </label>
+    <label class="row">
+      <div class="row-label">
+        <span>Still Camera RAW Override</span>
+        <span class="row-sub">.cr3, .nef, .arw, .dng (AEM supports natively)</span>
+      </div>
+      <input type="checkbox" id="fmt-rawAcrFallback" />
+    </label>
+    <label class="row">
+      <div class="row-label">
+        <span>Audio Spectrum & Waveform</span>
+        <span class="row-sub">.mp3, .wav, .flac, .ogg</span>
+      </div>
+      <input type="checkbox" id="fmt-audio" />
+    </label>
+  </div>
+
+  <div class="footer">
+    <button id="clear-cache">🗑 Clear Cached Thumbnails</button>
+  </div>
+
+  <script src="../dist/popup.js"></script>
+</body>
+</html>

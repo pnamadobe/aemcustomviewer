@@ -1,4 +1,5 @@
 import type { AssetMeta } from '../assets-api';
+import { getSettings } from '../settings';
 import type { ViewerPlugin } from './types';
 import { gsplatViewer } from './gsplat';
 import { model3dViewer } from './model3d';
@@ -22,10 +23,33 @@ export const VIEWER_PLUGINS: readonly ViewerPlugin[] = [
 
 const extOf = (name: string) => name.split('.').pop()?.toLowerCase() ?? '';
 
+function isPluginEnabled(pluginId: string): boolean {
+  const s = getSettings();
+  if (!s.enabled) return false;
+  switch (pluginId) {
+    case 'gsplat':
+      return s.formats.gsplat;
+    case 'model3d':
+      return s.formats.model3d;
+    case 'font':
+      return s.formats.font;
+    case 'raw-image':
+      return s.formats.raw || s.formats.rawAcrFallback;
+    case 'audio-spectrum':
+      return s.formats.audio;
+    default:
+      return true;
+  }
+}
+
 export function pickViewer(meta: AssetMeta): ViewerPlugin | null {
   const ext = extOf(meta.name || meta.damPath);
   for (const plugin of VIEWER_PLUGINS) {
-    if (plugin.match?.(meta)) return plugin;
+    if (!isPluginEnabled(plugin.id)) continue;
+    if (plugin.match) {
+      if (plugin.match(meta)) return plugin;
+      continue;
+    }
     if (ext && plugin.extensions.includes(ext)) return plugin;
     if (meta.mime && plugin.mimeTypes?.includes(meta.mime)) return plugin;
   }
