@@ -9,11 +9,94 @@ function extOf(name: string): string {
 }
 
 /**
+ * Scans a buffer (first 128 KB) for TIFF IFD headers ("II*\0" or "MM\0*") — which appear
+ * at byte 0 in .dng/.nef/.arw/.cr2/.orf/.pef/.rw2 and inside the CMT1 box in Canon .cr3 —
+ * and returns the EXIF Orientation tag (0x0112, values 1..8, default 1).
+ */
+function extractExifOrientation(buf: ArrayBuffer, maxScanBytes = 131072): number {
+  const len = Math.min(buf.byteLength, maxScanBytes);
+  const u8 = new Uint8Array(buf, 0, len);
+  const dv = new DataView(buf, 0, len);
+
+  for (let i = 0; i < len - 16; i++) {
+    const isII = u8[i] === 0x49 && u8[i + 1] === 0x49 && u8[i + 2] === 0x2a && u8[i + 3] === 0x00;
+    const isMM = u8[i] === 0x4d && u8[i + 1] === 0x4d && u8[i + 2] === 0x00 && u8[i + 3] === 0x2a;
+    if (!isII && !isMM) continue;
+
+    const le = isII;
+    const ifdRel = dv.getUint32(i + 4, le);
+    if (ifdRel < 8 || i + ifdRel + 2 >= len) continue;
+
+    const count = dv.getUint16(i + ifdRel, le);
+    if (count === 0 || count > 250 || i + ifdRel + 2 + count * 12 > len) continue;
+
+    for (let e = 0; e < count; e++) {
+      const eOff = i + ifdRel + 2 + e * 12;
+      const tag = dv.getUint16(eOff, le);
+      const type = dv.getUint16(eOff + 2, le);
+      if (tag === 0x0112) {
+        const val = type === 3 ? dv.getUint16(eOff + 8, le) : dv.getUint32(eOff + 8, le);
+        if (val >= 1 && val <= 8) return val;
+      }
+    }
+  }
+  return 1;
+}
+
+/**
+ * Draws an ImageBitmap onto a canvas while applying EXIF Orientation (1..8).
+ */
+function drawBitmapWithOrientation(bmp: ImageBitmap, orientation: number): HTMLCanvasElement {
+  const sw = bmp.width;
+  const sh = bmp.height;
+  const swapDims = orientation >= 5 && orientation <= 8;
+  const out = document.createElement('canvas');
+  out.width = swapDims ? sh : sw;
+  out.height = swapDims ? sw : sh;
+  const ctx = out.getContext('2d')!;
+
+  switch (orientation) {
+    case 2:
+      ctx.translate(sw, 0);
+      ctx.scale(-1, 1);
+      break;
+    case 3:
+      ctx.translate(sw, sh);
+      ctx.rotate(Math.PI);
+      break;
+    case 4:
+      ctx.translate(0, sh);
+      ctx.scale(1, -1);
+      break;
+    case 5:
+      ctx.rotate(0.5 * Math.PI);
+      ctx.scale(1, -1);
+      break;
+    case 6:
+      ctx.translate(sh, 0);
+      ctx.rotate(0.5 * Math.PI);
+      break;
+    case 7:
+      ctx.translate(sh, sw);
+      ctx.rotate(0.5 * Math.PI);
+      ctx.scale(-1, 1);
+      break;
+    case 8:
+      ctx.translate(0, sw);
+      ctx.rotate(-0.5 * Math.PI);
+      break;
+    default:
+      break;
+  }
+  ctx.drawImage(bmp, 0, 0);
+  return out;
+}
+
+/**
  * Finds the largest embedded JPEG stream (SOI 0xFFD8FF .. EOI 0xFFD9) inside a Camera RAW
  * container (.cr3 ISOBMFF, .cr2, .nef, .arw, .dng, .raf, .rw2, .orf, .pef, .iiq, .3fr).
- * Every digital camera RAW embeds at least one full- or half-resolution preview JPEG.
  */
-function extractLargestEmbeddedJpeg(buf: ArrayBuffer): Blob | null {
+function extractLargestEmbeddedJpeg(buf: ArrayBuffer): Uint8Array | null {
   const b = new Uint8Array(buf);
   const len = b.length;
   let bestStart = -1;
@@ -22,24 +105,20 @@ function extractLargestEmbeddedJpeg(buf: ArrayBuffer): Blob | null {
 
   let i = 0;
   while (i < len - 4) {
-    // Look for JPEG SOI marker: FF D8 FF (followed by E0/E1/DB/C0/C4/FE)
     if (b[i] === 0xff && b[i + 1] === 0xd8 && b[i + 2] === 0xff) {
       const m = b[i + 3];
       if (m === 0xe0 || m === 0xe1 || m === 0xdb || m === 0xc0 || m === 0xc4 || m === 0xfe) {
         const start = i;
-        // Scan forward for EOI (FF D9) that yields a sizeable JPEG (> 16 KB)
         let j = start + 4096;
         let lastEoi = -1;
         while (j < len - 1) {
           if (b[j] === 0xff && b[j + 1] === 0xd9) {
             lastEoi = j + 2;
-            // Check if another SOI starts soon or if this JPEG is already large
             if (lastEoi - start > bestSize) {
               bestStart = start;
               bestEnd = lastEoi;
               bestSize = lastEoi - start;
             }
-            // If we found a preview > 150 KB, check if walking further hits a new SOI
             if (lastEoi - start > 150000) break;
           }
           j++;
@@ -52,20 +131,17 @@ function extractLargestEmbeddedJpeg(buf: ArrayBuffer): Blob | null {
   }
 
   if (bestStart >= 0 && bestEnd > bestStart && bestSize > 4096) {
-    return new Blob([b.subarray(bestStart, bestEnd)], { type: 'image/jpeg' });
+    return b.subarray(bestStart, bestEnd);
   }
   return null;
 }
 
-/**
- * Extracts readable camera Make/Model/Lens strings from the first 64 KB of a RAW header.
- */
 function extractCameraSummary(buf: ArrayBuffer, ext: string): string {
   const head = new Uint8Array(buf, 0, Math.min(buf.byteLength, 65536));
   const ascii = new TextDecoder('latin1').decode(head);
   const brands = [
     /(Canon EOS [A-Za-z0-9\- ]{1,18})/,
-    /(NIKON Z [A-Za-z0-9_]{1,12}|NIKON D[0-9A-Za-z]{1,8})/,
+    /(NIKON Z [A-Za-z0-9_]{1,12}|NIKON D[0-9A-Za-z]{1,8}|Nikon COOLSCAN [A-Za-z0-9 ]{1,14})/,
     /(ILCE-[0-9A-Za-z]{2,10}|Sony [A-Za-z0-9\-]{2,14})/,
     /(FUJIFILM X-[A-Za-z0-9]{1,10}|GFX[0-9A-Za-z]{2,8})/,
     /(Hasselblad [A-Za-z0-9\- ]{2,16})/,
@@ -80,17 +156,13 @@ function extractCameraSummary(buf: ArrayBuffer, ext: string): string {
   return `${ext.toUpperCase()} Image`;
 }
 
-/**
- * Decodes an HDR (.hdr / .exr) or Camera RAW buffer into an HTMLCanvasElement at base exposure.
- */
 async function decodeRawOrHdrToCanvas(
   buf: ArrayBuffer,
   ext: string,
   exposureEv = 0,
 ): Promise<{ canvas: HTMLCanvasElement; width: number; height: number; isFloatHdr: boolean }> {
   if (ext === 'hdr' || ext === 'exr') {
-    const texData =
-      ext === 'hdr' ? new RGBELoader().parse(buf) : new EXRLoader().parse(buf);
+    const texData = ext === 'hdr' ? new RGBELoader().parse(buf) : new EXRLoader().parse(buf);
     const w = texData.width || 512;
     const h = texData.height || 512;
 
@@ -115,7 +187,6 @@ async function decodeRawOrHdrToCanvas(
     scene.add(quad);
     renderer.render(scene, cam);
 
-    // Copy to a 2D canvas so we can dispose the WebGL context immediately
     const out = document.createElement('canvas');
     out.width = w;
     out.height = h;
@@ -126,13 +197,26 @@ async function decodeRawOrHdrToCanvas(
     return { canvas: out, width: w, height: h, isFloatHdr: true };
   }
 
-  // Camera RAW (.cr3, .cr2, .nef, .arw, .dng, .raf, .rw2, .orf, .pef, .iiq, .3fr)
-  const jpegBlob = extractLargestEmbeddedJpeg(buf) ?? new Blob([buf]);
-  const bmp = await createImageBitmap(jpegBlob);
-  const out = document.createElement('canvas');
-  out.width = bmp.width;
-  out.height = bmp.height;
-  out.getContext('2d')!.drawImage(bmp, 0, 0);
+  // Extract outer RAW container EXIF Orientation (e.g. DNG/NEF/ARW TIFF IFD0 or CR3 CMT1)
+  const containerOrientation = extractExifOrientation(buf);
+  const jpegBytes = extractLargestEmbeddedJpeg(buf);
+  const blob = jpegBytes
+    ? new Blob([jpegBytes.buffer.slice(jpegBytes.byteOffset, jpegBytes.byteOffset + jpegBytes.byteLength) as ArrayBuffer], {
+        type: 'image/jpeg',
+      })
+    : new Blob([buf]);
+
+  // Decode raw sensor pixels without browser auto-orienting so we never double-rotate,
+  // then apply the authoritative container (or embedded JPEG) EXIF orientation.
+  const embeddedOrientation = jpegBytes
+    ? extractExifOrientation(
+        jpegBytes.buffer.slice(jpegBytes.byteOffset, jpegBytes.byteOffset + Math.min(jpegBytes.byteLength, 65536)) as ArrayBuffer,
+      )
+    : 1;
+  const effectiveOrientation = containerOrientation !== 1 ? containerOrientation : embeddedOrientation;
+
+  const bmp = await createImageBitmap(blob, { imageOrientation: 'none' });
+  const out = drawBitmapWithOrientation(bmp, effectiveOrientation);
   bmp.close();
   return { canvas: out, width: out.width, height: out.height, isFloatHdr: false };
 }
@@ -180,10 +264,6 @@ function drawHistogram(source: HTMLCanvasElement, target: HTMLCanvasElement) {
   drawChannel(bBins, 'rgba(59, 130, 246, 0.75)');
 }
 
-/**
- * Formats that AEM as a Cloud Service does NOT support natively at all
- * (32-bit float HDR/EXR, Cinema RAW, and camera formats omitted from AEM's ACR table).
- */
 export const UNSUPPORTED_BY_AEM_RAW_EXTS = [
   'hdr',
   'exr',
@@ -201,12 +281,6 @@ export const UNSUPPORTED_BY_AEM_RAW_EXTS = [
   'rwz',
 ] as const;
 
-/**
- * Still-camera RAW formats listed in AEM's Adobe Camera Raw support table.
- * For these extensions, our plugin ONLY activates as a fallback when AEM failed
- * to generate a native rendition (`meta.hasNativeRendition === false`), e.g. for
- * brand-new camera bodies or unsupported lossless/high-efficiency compression modes.
- */
 export const AEM_ACR_FALLBACK_RAW_EXTS = [
   'cr3',
   'cr2',
@@ -250,14 +324,17 @@ export const rawImageViewer: ViewerPlugin = {
     const s = getSettings();
     const ext = extOf(meta.name || meta.damPath);
     if (ALWAYS_SET.has(ext)) return s.formats.raw;
-    if (FALLBACK_SET.has(ext)) return s.formats.rawAcrFallback;
+    if (FALLBACK_SET.has(ext)) {
+      if (s.formats.rawAcrFallback) return true;
+      // Also step in automatically when AEM failed to generate a native rendition (e.g. 023A9867.CR3)
+      if (s.formats.raw && meta.hasNativeRendition === false) return true;
+    }
     return false;
   },
 
   async renderThumbnail(meta, fetchBuffer) {
     const ext = extOf(meta.name);
     let buf: ArrayBuffer;
-    // For Camera RAW containers, try fetching only the first 8 MB via HTTP 206 Range request first
     if (ext !== 'hdr' && ext !== 'exr' && (!meta.size || meta.size > 8 * 1024 * 1024)) {
       const headBuf = await fetchBuffer([0, 8 * 1024 * 1024 - 1]);
       buf = extractLargestEmbeddedJpeg(headBuf) ? headBuf : await fetchBuffer();
@@ -279,7 +356,6 @@ export const rawImageViewer: ViewerPlugin = {
     const ext = extOf(ctx.meta.name);
     ctx.setProgress(5, `Downloading ${ctx.meta.name}…`);
     let buf: ArrayBuffer;
-    // Fast Range probe for large Camera RAWs (> 8 MB) before falling back to full file download
     if (ext !== 'hdr' && ext !== 'exr' && ctx.meta.size && ctx.meta.size > 8 * 1024 * 1024) {
       ctx.setProgress(25, `Reading embedded preview from first 8 MB of ${ctx.meta.name}…`);
       const rangeBytes = await ctx.fetchRange(0, 8 * 1024 * 1024 - 1);
@@ -307,7 +383,7 @@ export const rawImageViewer: ViewerPlugin = {
     ctx.setProgress(null);
 
     ctx.setStatus(
-      `${decoded.width}×${decoded.height} · ${(buf.byteLength / 1048576).toFixed(1)} MB · ${camSummary}`,
+      `${decoded.width}×${decoded.height} · ${( (ctx.meta.size || buf.byteLength) / 1048576 ).toFixed(1)} MB · ${camSummary}`,
     );
 
     const wrap = document.createElement('div');
@@ -320,7 +396,6 @@ export const rawImageViewer: ViewerPlugin = {
     displayCanvas.style.cssText =
       'max-width:94%;max-height:92%;object-fit:contain;box-shadow:0 12px 40px rgba(0,0,0,.6);transition:transform 0.08s ease-out;cursor:zoom-in;';
 
-    // Top-right RGB Histogram + Exposure Slider HUD
     const hud = document.createElement('div');
     hud.style.cssText =
       'position:absolute;top:12px;right:12px;padding:10px 12px;border-radius:10px;background:rgba(15,17,23,0.85);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.1);display:flex;flex-direction:column;gap:8px;z-index:2;width:192px;';
@@ -345,8 +420,11 @@ export const rawImageViewer: ViewerPlugin = {
 
     let exposure = 0;
     let zoom = 1;
-    let panX = 0;
-    let panY = 0;
+    let extraRotDeg = 0;
+
+    const applyTransform = () => {
+      displayCanvas.style.transform = `scale(${zoom}) rotate(${extraRotDeg}deg)`;
+    };
 
     const redraw = async () => {
       const dctx = displayCanvas.getContext('2d')!;
@@ -370,15 +448,22 @@ export const rawImageViewer: ViewerPlugin = {
 
     displayCanvas.onclick = () => {
       zoom = zoom === 1 ? 2.2 : 1;
-      panX = 0;
-      panY = 0;
-      displayCanvas.style.transform = `scale(${zoom}) translate(${panX}px, ${panY}px)`;
+      applyTransform();
       displayCanvas.style.cursor = zoom > 1 ? 'zoom-out' : 'zoom-in';
     };
 
     await redraw();
 
     ctx.setActions([
+      {
+        id: 'rotate',
+        label: '⟳ Rotate 90°',
+        title: 'Rotate preview 90° clockwise',
+        onClick: () => {
+          extraRotDeg = (extraRotDeg + 90) % 360;
+          applyTransform();
+        },
+      },
       {
         id: 'reset-ev',
         label: 'Reset 0 EV',
@@ -391,7 +476,7 @@ export const rawImageViewer: ViewerPlugin = {
       },
       {
         id: 'zoom',
-        label: '1:1 Loupe Toggle',
+        label: '1:1 Loupe',
         onClick: () => displayCanvas.click(),
       },
       {
