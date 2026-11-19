@@ -1,20 +1,20 @@
 {
   "name": "aem-assets-custom-viewer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
-    "build": "esbuild src/content.ts src/page-hook.ts --bundle --format=iife --target=chrome111 --loader:.css=text --outdir=dist",
+    "build": "esbuild src/content.ts src/page-hook.ts --bundle --minify --format=iife --target=chrome111 --loader:.css=text --outdir=dist",
     "watch": "npm run build -- --watch",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.270",
+    "@types/three": "^0.183.1",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "@types/three": "^0.187.0",
     "gsplat": "^1.2.9",
-    "three": "^0.187.0"
+    "three": "^0.183.2"
   }
 }

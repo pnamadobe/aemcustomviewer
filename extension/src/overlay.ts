@@ -41,8 +41,14 @@ export function waitForPreview(signal: AbortSignal, timeoutMs = 15000): Promise<
 export function mountOverlay(target: HTMLElement): Overlay {
   document.querySelectorAll('[data-acv-overlay]').forEach((el) => el.remove());
 
+  const computedPos = getComputedStyle(target).position;
+  if (computedPos === 'static') {
+    target.style.position = 'relative';
+  }
+
   const host = document.createElement('div');
   host.setAttribute('data-acv-overlay', '');
+  host.style.cssText = 'position:absolute;inset:0;z-index:2;display:block;';
   const root = host.attachShadow({ mode: 'closed' });
   root.innerHTML = `<style>${css}</style>
     <div class="frame">
@@ -64,25 +70,7 @@ export function mountOverlay(target: HTMLElement): Overlay {
         </div>
       </div>
     </div>`;
-  document.body.appendChild(host);
-
-  const place = () => {
-    const r = target.getBoundingClientRect();
-    Object.assign(host.style, {
-      position: 'fixed',
-      left: `${r.left}px`,
-      top: `${r.top}px`,
-      width: `${r.width}px`,
-      height: `${r.height}px`,
-      zIndex: '10',
-      display: target.isConnected && r.width > 0 && r.height > 0 ? '' : 'none',
-    });
-  };
-  const ro = new ResizeObserver(place);
-  ro.observe(target);
-  addEventListener('resize', place);
-  addEventListener('scroll', place, true);
-  place();
+  target.appendChild(host);
 
   let hidden = false;
   const frame = root.querySelector<HTMLElement>('.frame')!;
@@ -132,9 +120,6 @@ export function mountOverlay(target: HTMLElement): Overlay {
       if (label) progressLabel.textContent = label;
     },
     dispose: () => {
-      ro.disconnect();
-      removeEventListener('resize', place);
-      removeEventListener('scroll', place, true);
       host.remove();
     },
   };

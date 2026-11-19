@@ -1,22 +1,28 @@
 {
   "manifest_version": 3,
   "name": "AEM Assets View – Custom Viewer",
-  "version": "0.1.0",
-  "description": "Renders proprietary formats in the Assets View main preview area.",
+  "version": "0.2.0",
+  "description": "Renders proprietary, 3D, font, and RAW formats in the Assets View main preview area and Card View.",
   "host_permissions": [
     "https://experience.adobe.com/*",
     "https://*.adobeaemcloud.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://experience.adobe.com/*"],
+      "matches": [
+        "https://experience.adobe.com/thunderbird/solutions/CQ-assets-app*",
+        "https://experience.adobe.com/solutions/CQ-assets-app*"
+      ],
       "js": ["dist/page-hook.js"],
       "world": "MAIN",
       "run_at": "document_start",
       "all_frames": true
     },
     {
-      "matches": ["https://experience.adobe.com/*"],
+      "matches": [
+        "https://experience.adobe.com/thunderbird/solutions/CQ-assets-app*",
+        "https://experience.adobe.com/solutions/CQ-assets-app*"
+      ],
       "js": ["dist/content.js"],
       "run_at": "document_start",
       "all_frames": true

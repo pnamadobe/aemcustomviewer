@@ -121,6 +121,7 @@ async function decodeRawOrHdrToCanvas(
     out.getContext('2d')!.drawImage(canvas, 0, 0);
     tex.dispose();
     renderer.dispose();
+    renderer.forceContextLoss();
     return { canvas: out, width: w, height: h, isFloatHdr: true };
   }
 
@@ -199,7 +200,14 @@ export const rawImageViewer: ViewerPlugin = {
 
   async renderThumbnail(meta, fetchBuffer) {
     const ext = extOf(meta.name);
-    const buf = await fetchBuffer();
+    let buf: ArrayBuffer;
+    // For Camera RAW containers, try fetching only the first 8 MB via HTTP 206 Range request first
+    if (ext !== 'hdr' && ext !== 'exr' && (!meta.size || meta.size > 8 * 1024 * 1024)) {
+      const headBuf = await fetchBuffer([0, 8 * 1024 * 1024 - 1]);
+      buf = extractLargestEmbeddedJpeg(headBuf) ? headBuf : await fetchBuffer();
+    } else {
+      buf = await fetchBuffer();
+    }
     const { canvas } = await decodeRawOrHdrToCanvas(buf, ext, 0);
 
     const thumb = document.createElement('canvas');
@@ -214,9 +222,27 @@ export const rawImageViewer: ViewerPlugin = {
   async mount(ctx) {
     const ext = extOf(ctx.meta.name);
     ctx.setProgress(5, `Downloading ${ctx.meta.name}…`);
-    const buf = await ctx.fetchBuffer((loaded, total) => {
-      if (total) ctx.setProgress((loaded / total) * 88);
-    });
+    let buf: ArrayBuffer;
+    // Fast Range probe for large Camera RAWs (> 8 MB) before falling back to full file download
+    if (ext !== 'hdr' && ext !== 'exr' && ctx.meta.size && ctx.meta.size > 8 * 1024 * 1024) {
+      ctx.setProgress(25, `Reading embedded preview from first 8 MB of ${ctx.meta.name}…`);
+      const rangeBytes = await ctx.fetchRange(0, 8 * 1024 * 1024 - 1);
+      const sliceBuf = rangeBytes.buffer.slice(
+        rangeBytes.byteOffset,
+        rangeBytes.byteOffset + rangeBytes.byteLength,
+      ) as ArrayBuffer;
+      if (extractLargestEmbeddedJpeg(sliceBuf)) {
+        buf = sliceBuf;
+      } else {
+        buf = await ctx.fetchBuffer((loaded, total) => {
+          if (total) ctx.setProgress((loaded / total) * 88);
+        });
+      }
+    } else {
+      buf = await ctx.fetchBuffer((loaded, total) => {
+        if (total) ctx.setProgress((loaded / total) * 88);
+      });
+    }
     if (ctx.signal.aborted) return () => {};
 
     ctx.setProgress(94, `Decoding ${ext.toUpperCase()} image…`);

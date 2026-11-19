@@ -91,10 +91,11 @@ function parseOpenTypeTables(buf: ArrayBuffer, fallbackName: string): ParsedFont
   return info;
 }
 
-async function registerFontFace(familyId: string, buf: ArrayBuffer): Promise<void> {
+async function registerFontFace(familyId: string, buf: ArrayBuffer): Promise<FontFace> {
   const face = new FontFace(familyId, buf.slice(0));
   await face.load();
   document.fonts.add(face);
+  return face;
 }
 
 function drawSpecimenCard(familyId: string, info: ParsedFontInfo, lightTheme = false): string {
@@ -148,9 +149,13 @@ export const fontViewer: ViewerPlugin = {
   async renderThumbnail(meta, fetchBuffer) {
     const buffer = await fetchBuffer();
     const familyId = `acv-font-thumb-${Math.random().toString(36).slice(2, 9)}`;
-    await registerFontFace(familyId, buffer);
-    const info = parseOpenTypeTables(buffer, meta.name);
-    return drawSpecimenCard(familyId, info, false);
+    const face = await registerFontFace(familyId, buffer);
+    try {
+      const info = parseOpenTypeTables(buffer, meta.name);
+      return drawSpecimenCard(familyId, info, false);
+    } finally {
+      document.fonts.delete(face);
+    }
   },
 
   async mount(ctx) {
@@ -161,7 +166,7 @@ export const fontViewer: ViewerPlugin = {
     if (ctx.signal.aborted) return () => {};
 
     const familyId = `acv-font-${Math.random().toString(36).slice(2, 9)}`;
-    await registerFontFace(familyId, buffer);
+    const face = await registerFontFace(familyId, buffer);
     const info = parseOpenTypeTables(buffer, ctx.meta.name);
     ctx.setProgress(null);
 
@@ -317,6 +322,7 @@ export const fontViewer: ViewerPlugin = {
     ctx.saveCardThumbnail(drawSpecimenCard(familyId, info, false)).catch(() => {});
 
     return () => {
+      document.fonts.delete(face);
       URL.revokeObjectURL(blobUrl);
       styleEl.remove();
       root.remove();

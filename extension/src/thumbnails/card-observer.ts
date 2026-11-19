@@ -1,5 +1,12 @@
 import type { AuthSnapshot } from '../bridge';
-import { getMetadata, fetchArrayBufferWithProgress, getSignedVideoUrl, type AssetMeta } from '../assets-api';
+import {
+  getMetadata,
+  getMetadataById,
+  getOriginal,
+  fetchArrayBufferWithProgress,
+  getSignedVideoUrl,
+  type AssetMeta,
+} from '../assets-api';
 import { pickViewer, type ViewerPlugin } from '../viewers';
 import type { AnimatedSplatPreview } from '../viewers/gsplat';
 import { getThumbnail, saveThumbnail, THUMB_UPDATED_EVENT } from './store';
@@ -7,9 +14,10 @@ import { getThumbnail, saveThumbnail, THUMB_UPDATED_EVENT } from './store';
 const CARD_ROW_SELECTOR = 'div[role="row"][data-key^="urn:aaid:aem:"]';
 const VIDEO_EXTS = new Set(['mp4', 'mov', 'webm', 'm4v', 'ogv']);
 const SCRUB_FRAMES = 24;
+const SIGNED_URL_TTL_MS = 15 * 60 * 1000;
 const inFlight = new Set<string>();
 const failed = new Set<string>();
-const signedVideoCache = new Map<string, Promise<string>>();
+const signedVideoCache = new Map<string, { expiresAt: number; promise: Promise<string> }>();
 let queueChain: Promise<void> = Promise.resolve();
 
 type CachedScrubStrip = {
@@ -41,6 +49,36 @@ function parseAnimatedPreview(raw: string | null): AnimatedSplatPreview | null {
   } catch {
     return null;
   }
+}
+
+async function resolveSignedVideoUrl(
+  auth: AuthSnapshot,
+  assetId: string,
+  knownFolder: string | null,
+  name: string,
+): Promise<string> {
+  const cacheKey = assetId || `${knownFolder}/${name}`;
+  const now = Date.now();
+  const hit = signedVideoCache.get(cacheKey);
+  if (hit && hit.expiresAt > now) return hit.promise;
+
+  const promise = (async () => {
+    let damPath = knownFolder ? `${knownFolder}/${name}` : '';
+    if (!damPath && assetId) {
+      const meta = await getMetadataById(auth, assetId);
+      damPath = meta.damPath;
+    }
+    if (!damPath) throw new Error('Unable to resolve video DAM path');
+    return getSignedVideoUrl(auth, damPath);
+  })();
+
+  signedVideoCache.set(cacheKey, { expiresAt: now + SIGNED_URL_TTL_MS, promise });
+  promise.catch(() => {
+    if (signedVideoCache.get(cacheKey)?.promise === promise) {
+      signedVideoCache.delete(cacheKey);
+    }
+  });
+  return promise;
 }
 
 async function generateScrubStrip(videoUrl: string): Promise<CachedScrubStrip | null> {
@@ -88,14 +126,16 @@ function attachVideoHoverScrub(
   row: HTMLElement,
   previewSlot: HTMLElement,
   assetId: string,
-  damPath: string,
+  name: string,
   getAuth: () => AuthSnapshot | null,
 ) {
   if (previewSlot.hasAttribute('data-acv-video-scrub')) return;
   previewSlot.setAttribute('data-acv-video-scrub', '1');
   previewSlot.style.position = 'relative';
 
-  const scrubCacheKeys = [`scrub:${assetId}`, `scrub:${damPath}`].filter((k) => k !== 'scrub:');
+  const folder = browseFolderFromHash();
+  const damPath = folder ? `${folder}/${name}` : '';
+  const scrubCacheKeys = [`scrub:${assetId}`, damPath ? `scrub:${damPath}` : ''].filter(Boolean);
 
   const hintBadge = document.createElement('span');
   hintBadge.setAttribute('data-acv-scrub-badge', '');
@@ -174,12 +214,7 @@ function attachVideoHoverScrub(
 
     const auth = getAuth();
     if (!auth || !video) return;
-    let urlPromise = signedVideoCache.get(damPath);
-    if (!urlPromise) {
-      urlPromise = getSignedVideoUrl(auth, damPath);
-      signedVideoCache.set(damPath, urlPromise);
-    }
-    const signedUrl = await urlPromise;
+    const signedUrl = await resolveSignedVideoUrl(auth, assetId, browseFolderFromHash(), name);
     if (!video.src) video.src = signedUrl;
 
     if (!stripBuilding) {
@@ -243,6 +278,14 @@ function attachVideoHoverScrub(
   });
 }
 
+function createBadgeEl(text: string): HTMLSpanElement {
+  const badge = document.createElement('span');
+  badge.textContent = text;
+  badge.style.cssText =
+    'position:absolute;top:14px;left:44px;padding:2px 7px;border-radius:4px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font:700 10px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:2';
+  return badge;
+}
+
 function mountCardPreview(
   row: HTMLElement,
   previewSlot: HTMLElement,
@@ -273,7 +316,6 @@ function mountCardPreview(
   }
   wrap.setAttribute('data-acv-state', stateKey);
 
-  // Clean up any previous animation timer on this card
   if ((wrap as any).__acvTimer) {
     clearInterval((wrap as any).__acvTimer);
     (wrap as any).__acvTimer = null;
@@ -281,17 +323,23 @@ function mountCardPreview(
 
   const anim = parseAnimatedPreview(rawPayload);
   const badgeText = anim ? `${plugin.badge} · ${anim.mode.toUpperCase()}` : plugin.badge;
-  const badgeHtml = `<span style="position:absolute;top:14px;left:44px;padding:2px 7px;border-radius:4px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;font:700 10px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.05em;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:2">${badgeText}</span>`;
+  wrap.replaceChildren(createBadgeEl(badgeText));
 
   if (anim && anim.frames.length > 0) {
-    // Flicker-free double-buffered compositor:
-    // The base layer stays at opacity: 1.0 permanently so the dark card background can NEVER bleed through.
-    // The overlay layer pre-decodes the next frame, fades 0 -> 1, then copies to base and resets to 0.
-    wrap.innerHTML = `${badgeHtml}
-      <img class="acv-layer-base" src="${anim.poster}" alt="${name}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;opacity:1" />
-      <img class="acv-layer-top" src="${anim.poster}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;transition:opacity 300ms linear;opacity:0" />`;
-    const baseImg = wrap.querySelector<HTMLImageElement>('.acv-layer-base')!;
-    const topImg = wrap.querySelector<HTMLImageElement>('.acv-layer-top')!;
+    const baseImg = document.createElement('img');
+    baseImg.className = 'acv-layer-base';
+    baseImg.src = anim.poster;
+    baseImg.alt = name;
+    baseImg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;opacity:1';
+
+    const topImg = document.createElement('img');
+    topImg.className = 'acv-layer-top';
+    topImg.src = anim.poster;
+    topImg.alt = '';
+    topImg.style.cssText =
+      'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;transition:opacity 300ms linear;opacity:0';
+
+    wrap.append(baseImg, topImg);
     let hovering = false;
     let transitioning = false;
 
@@ -317,7 +365,6 @@ function mountCardPreview(
         topImg.style.opacity = '0';
         topImg.src = nextSrc;
         if (topImg.decode) await topImg.decode().catch(() => {});
-        // Force style flush then fade overlay from 0 -> 1 over opaque base
         void topImg.offsetWidth;
         topImg.style.transition = 'opacity 300ms linear';
         topImg.style.opacity = '1';
@@ -351,9 +398,17 @@ function mountCardPreview(
       });
     }
   } else if (rawPayload) {
-    wrap.innerHTML = `${badgeHtml}<img src="${rawPayload}" alt="${name}" style="width:100%;height:100%;object-fit:cover;display:block" />`;
+    const img = document.createElement('img');
+    img.src = rawPayload;
+    img.alt = name;
+    img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block';
+    wrap.appendChild(img);
   } else {
-    wrap.innerHTML = `${badgeHtml}<div style="color:#a1a1aa;font:500 11px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;text-align:center;padding:12px">Rendering animated ${plugin.badge} preview…</div>`;
+    const msg = document.createElement('div');
+    msg.style.cssText =
+      'color:#a1a1aa;font:500 11px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;text-align:center;padding:12px';
+    msg.textContent = `Rendering ${plugin.badge} preview…`;
+    wrap.appendChild(msg);
   }
 }
 
@@ -368,20 +423,19 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
   const folder = browseFolderFromHash();
   const damPath = folder ? `${folder}/${name}` : `/content/dam/${name}`;
 
-  // 1. Video Hover-Scrubbing for MP4/MOV/WebM cards
-  if (VIDEO_EXTS.has(extOf(name)) && folder) {
-    attachVideoHoverScrub(row, previewSlot, assetId, damPath, getAuth);
+  // 1. Video Hover-Scrubbing for MP4/MOV/WebM cards (works in Folders, Search Results, and Collections)
+  if (VIDEO_EXTS.has(extOf(name)) && (folder || assetId)) {
+    attachVideoHoverScrub(row, previewSlot, assetId, name, getAuth);
     return;
   }
 
-  // 2. Custom Plugin Thumbnails (Animated 3DGS, Audio Waveform, etc.)
+  // 2. Custom Plugin Thumbnails (Animated 3DGS, 3D Mesh, Font, Camera RAW/HDR, Audio Waveform)
   const pseudoMeta: AssetMeta = { id: assetId, damPath, name, mime: '' };
   const plugin = pickViewer(pseudoMeta);
   if (!plugin) return;
 
-  const keys = [assetId, damPath, name].filter(Boolean);
+  const keys = [assetId, folder ? damPath : '', name].filter(Boolean);
   const cached = await getThumbnail(keys);
-  // Upgrade old static or v1 fast-loop 3DGS thumbnails to slow-drift acv-anim-v2 automatically
   const isOutdatedSplat = plugin.id === 'gsplat' && cached && !parseAnimatedPreview(cached);
   if (cached && !isOutdatedSplat) {
     mountCardPreview(row, previewSlot, descSlot, plugin, name, cached);
@@ -397,11 +451,15 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
   queueChain = queueChain
     .then(async () => {
       const auth = getAuth();
-      if (!auth || !folder) return;
+      if (!auth) return;
       const ctl = new AbortController();
-      const meta = await getMetadata(auth, damPath, ctl.signal);
-      // Do not silently download >60 MB files in the background from Card View;
-      // their thumbnail will be captured automatically when opened in Details View.
+      const meta = folder
+        ? await getMetadata(auth, damPath, ctl.signal)
+        : assetId
+          ? await getMetadataById(auth, assetId, ctl.signal)
+          : null;
+      if (!meta) return;
+
       if (meta.size && meta.size > 60 * 1024 * 1024) {
         failed.add(lockKey);
         if (previewSlot.isConnected) {
@@ -411,9 +469,15 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
         }
         return;
       }
-      const rendered = await plugin.renderThumbnail!(meta, () =>
-        fetchArrayBufferWithProgress(auth, meta, ctl.signal),
-      );
+
+      const rendered = await plugin.renderThumbnail!(meta, async (range) => {
+        if (range) {
+          const r = await getOriginal(auth, meta, { range, signal: ctl.signal });
+          return r.arrayBuffer();
+        }
+        return fetchArrayBufferWithProgress(auth, meta, ctl.signal);
+      });
+
       if (rendered) {
         await saveThumbnail([meta.id, meta.damPath, meta.name, assetId], rendered);
         if (previewSlot.isConnected) {

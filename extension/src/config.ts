@@ -20,20 +20,10 @@ export const DEFAULT_API_KEY = 'aem-assets-frontend-1';
 export const endpoints = {
   repositoryItem: (base: string, damPath: string) =>
     `${base}/adobe/repository?path=${encodeURIComponent(damPath)}`,
-  assetMetadata: (base: string, damPath: string) =>
-    `${base}/adobe/repository${ encodeURI(damPath) };resource=assetmetadata`,
+  repositoryById: (base: string, assetId: string) =>
+    `${base}/adobe/repository/?id=${encodeURIComponent(assetId)}`,
   originalBinary: (base: string, damPath: string) =>
     `${base}${encodeURI(damPath)}`,
-  blockDownload: (base: string, damPath: string) =>
-    `${base}/adobe/repository${encodeURI(damPath)};api=block_download`,
 };
 
-/**
- * Proprietary formats handled by this extension (lowercase extensions, without leading dot).
- * Includes 'mp3' for immediate live testing on /content/dam/26H2/customviewer/music box.mp3;
- * add your proprietary extensions here.
- */
-export const SUPPORTED_EXTENSIONS = new Set<string>(['xyz', 'mp3']);
-export const SUPPORTED_MIME = new Set<string>(['application/x-proprietary', 'audio/mpeg']);
-
-export const DEBUG = true;
+export const DEBUG = false;

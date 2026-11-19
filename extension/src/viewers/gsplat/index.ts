@@ -325,7 +325,9 @@ export const gsplatViewer: ViewerPlugin = {
     }
 
     controls.dispose();
+    const gl = renderer.gl;
     renderer.dispose();
+    gl?.getExtension('WEBGL_lose_context')?.loseContext();
 
     const payload: AnimatedSplatPreview = {
       kind: 'acv-anim-v4',
@@ -415,7 +417,7 @@ export const gsplatViewer: ViewerPlugin = {
     };
     applyBg();
 
-    let controls = new SPLAT.OrbitControls(camera, canvas);
+    let controls = new SPLAT.OrbitControls(camera, canvas, 0.5, 0.5, 5, false);
     let splatCount = 0;
     let activeSplat: SPLAT.Splat | null = null;
 
@@ -443,9 +445,10 @@ export const gsplatViewer: ViewerPlugin = {
     const applyCameraPreset = (inside: boolean) => {
       insideMode = inside;
       controls.dispose();
+      // Pass enableKeyboardControls=false so typing into AEM metadata inputs in the side panel never moves the 3D camera
       controls = inside
-        ? new SPLAT.OrbitControls(camera, canvas, -0.35, 0.10, stats.idealRadius, true, stats.target)
-        : new SPLAT.OrbitControls(camera, canvas, 0.42, 0.22, Math.max(1.8, stats.idealRadius), true, stats.target);
+        ? new SPLAT.OrbitControls(camera, canvas, -0.35, 0.10, stats.idealRadius, false, stats.target)
+        : new SPLAT.OrbitControls(camera, canvas, 0.42, 0.22, Math.max(1.8, stats.idealRadius), false, stats.target);
       resize();
     };
     applyCameraPreset(insideMode);
@@ -717,7 +720,9 @@ export const gsplatViewer: ViewerPlugin = {
       cancelAnimationFrame(rafId);
       ro.disconnect();
       controls.dispose();
+      const gl = renderer.gl;
       renderer.dispose();
+      gl?.getExtension('WEBGL_lose_context')?.loseContext();
       canvas.remove();
       hint.remove();
     };

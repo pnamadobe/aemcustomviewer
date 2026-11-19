@@ -36,6 +36,13 @@ export interface ViewerPlugin {
   mimeTypes?: readonly string[];
   match?: (meta: AssetMeta) => boolean;
   mount: (ctx: ViewerContext) => Promise<() => void>;
-  /** Optional headless generator that produces a Card View thumbnail data URL from the binary. */
-  renderThumbnail?: (meta: AssetMeta, fetchBuffer: () => Promise<ArrayBuffer>) => Promise<string | null>;
+  /**
+   * Optional headless generator that produces a Card View thumbnail data URL from the binary.
+   * `fetchBuffer` accepts an optional `[start, end]` byte range for formats (like Camera RAW)
+   * whose embedded preview JPEG lives in the first few megabytes.
+   */
+  renderThumbnail?: (
+    meta: AssetMeta,
+    fetchBuffer: (range?: [number, number]) => Promise<ArrayBuffer>,
+  ) => Promise<string | null>;
 }

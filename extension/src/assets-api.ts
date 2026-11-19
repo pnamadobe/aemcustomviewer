@@ -18,22 +18,35 @@ const buildHeaders = (a: AuthSnapshot, extra: Record<string, string> = {}) => ({
   ...extra,
 });
 
-export async function getMetadata(a: AuthSnapshot, damPath: string, signal?: AbortSignal): Promise<AssetMeta> {
-  const r = await fetch(endpoints.repositoryItem(a.apiBase, damPath), {
-    headers: buildHeaders(a),
-    signal,
-  });
-  if (!r.ok) throw new Error(`repository metadata ${r.status}`);
-  const j = await r.json();
+function parseRepoJson(j: any, fallbackPath = ''): AssetMeta {
+  const damPath = j['repo:path'] ?? fallbackPath;
   return {
     id: j['repo:id'] ?? '',
-    damPath: j['repo:path'] ?? damPath,
+    damPath,
     name: j['repo:name'] ?? damPath.split('/').pop() ?? '',
     mime: j['dc:format'] ?? '',
     size: Number(j['repo:size']) || undefined,
     primaryHref: j._links?.['http://ns.adobe.com/adobecloud/rel/primary']?.href,
     blockDownloadHref: j._links?.['http://ns.adobe.com/adobecloud/rel/download']?.href,
   };
+}
+
+export async function getMetadata(a: AuthSnapshot, damPath: string, signal?: AbortSignal): Promise<AssetMeta> {
+  const r = await fetch(endpoints.repositoryItem(a.apiBase, damPath), {
+    headers: buildHeaders(a),
+    signal,
+  });
+  if (!r.ok) throw new Error(`repository metadata ${r.status}`);
+  return parseRepoJson(await r.json(), damPath);
+}
+
+export async function getMetadataById(a: AuthSnapshot, assetId: string, signal?: AbortSignal): Promise<AssetMeta> {
+  const r = await fetch(endpoints.repositoryById(a.apiBase, assetId), {
+    headers: buildHeaders(a),
+    signal,
+  });
+  if (!r.ok) throw new Error(`repository id metadata ${r.status}`);
+  return parseRepoJson(await r.json());
 }
 
 export async function getSignedVideoUrl(a: AuthSnapshot, damPath: string, signal?: AbortSignal): Promise<string> {

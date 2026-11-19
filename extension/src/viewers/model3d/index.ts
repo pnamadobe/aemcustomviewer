@@ -144,6 +144,7 @@ export const model3dViewer: ViewerPlugin = {
     }
 
     renderer.dispose();
+    renderer.forceContextLoss();
     const payload: AnimatedSplatPreview = {
       kind: 'acv-anim-v4',
       mode: 'orbit',
@@ -380,6 +381,7 @@ export const model3dViewer: ViewerPlugin = {
       ro.disconnect();
       controls.dispose();
       renderer.dispose();
+      renderer.forceContextLoss();
       canvas.remove();
     };
   },
