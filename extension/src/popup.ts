@@ -14,6 +14,7 @@ async function init() {
   const fmtKeys: (keyof ExtensionSettings['formats'])[] = [
     'gsplat',
     'model3d',
+    'texture3d',
     'font',
     'raw',
     'rawAcrFallback',
@@ -41,6 +42,7 @@ async function init() {
       formats: {
         gsplat: $<HTMLInputElement>('fmt-gsplat').checked,
         model3d: $<HTMLInputElement>('fmt-model3d').checked,
+        texture3d: $<HTMLInputElement>('fmt-texture3d').checked,
         font: $<HTMLInputElement>('fmt-font').checked,
         raw: $<HTMLInputElement>('fmt-raw').checked,
         rawAcrFallback: $<HTMLInputElement>('fmt-rawAcrFallback').checked,

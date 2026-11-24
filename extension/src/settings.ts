@@ -6,6 +6,7 @@ export interface ExtensionSettings {
   formats: {
     gsplat: boolean;
     model3d: boolean;
+    texture3d: boolean;
     font: boolean;
     raw: boolean;
     rawAcrFallback: boolean;
@@ -22,6 +23,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   formats: {
     gsplat: true,
     model3d: true,
+    texture3d: true,
     font: true,
     raw: true,
     rawAcrFallback: false, // Default OFF so AEM's native ACR (.cr2/.cr3/.nef/.arw/.dng) stays untouched
