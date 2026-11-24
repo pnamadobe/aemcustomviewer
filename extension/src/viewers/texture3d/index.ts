@@ -793,7 +793,12 @@ function buildTrimModelFromEntry(
   let rawRoot: THREE.Object3D;
   try {
     if (ext === 'fbx') {
-      const loader = new FBXLoader();
+      const manager = new THREE.LoadingManager();
+      manager.setURLModifier((url) => {
+        if (url.startsWith('blob:') || url.startsWith('data:')) return url;
+        return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIAAAUAAeImBZsAAAAASUVORK5CYII=';
+      });
+      const loader = new FBXLoader(manager);
       rawRoot = loader.parse(sliceBuf, '');
     } else if (ext === 'obj') {
       const text = new TextDecoder().decode(sliceBuf);

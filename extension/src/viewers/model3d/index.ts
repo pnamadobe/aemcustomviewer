@@ -17,6 +17,19 @@ function extOf(name: string): string {
   return name.split('.').pop()?.toLowerCase() ?? '';
 }
 
+const TRANSPARENT_1PX_PNG =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIAAAUAAeImBZsAAAAASUVORK5CYII=';
+
+function createSafeLoadingManager(): THREE.LoadingManager {
+  const manager = new THREE.LoadingManager();
+  manager.setURLModifier((url) => {
+    if (url.startsWith('blob:') || url.startsWith('data:')) return url;
+    // Prevent standalone FBX/Collada/3DS files with local disk texture paths from firing 404s
+    return TRANSPARENT_1PX_PNG;
+  });
+  return manager;
+}
+
 interface LoadedModel {
   root: THREE.Object3D;
   animations: THREE.AnimationClip[];
@@ -83,29 +96,29 @@ async function parseModelBuffer(buffer: ArrayBuffer, ext: string): Promise<Loade
     root = gltf.scene;
     animations = gltf.animations || [];
   } else if (ext === 'fbx') {
-    const loader = new FBXLoader();
+    const loader = new FBXLoader(createSafeLoadingManager());
     root = loader.parse(buffer, '');
     animations = (root as any).animations || [];
     upgradeLegacyMaterialsToPbr(root);
   } else if (ext === 'usdz' || ext === 'usda' || ext === 'usdc' || ext === 'usd') {
-    const loader = new USDLoader();
+    const loader = new USDLoader(createSafeLoadingManager());
     root = loader.parse(buffer);
     upgradeLegacyMaterialsToPbr(root);
   } else if (ext === 'dae') {
     const text = new TextDecoder().decode(buffer);
-    const loader = new ColladaLoader();
+    const loader = new ColladaLoader(createSafeLoadingManager());
     const collada = loader.parse(text, '');
     if (!collada) throw new Error('Invalid Collada DAE');
     root = collada.scene;
     animations = (collada as any).animations || [];
     upgradeLegacyMaterialsToPbr(root);
   } else if (ext === '3mf') {
-    const loader = new ThreeMFLoader();
+    const loader = new ThreeMFLoader(createSafeLoadingManager());
     root = loader.parse(buffer);
     root.rotation.set(-Math.PI / 2, 0, 0);
     upgradeLegacyMaterialsToPbr(root);
   } else if (ext === '3ds') {
-    const loader = new TDSLoader();
+    const loader = new TDSLoader(createSafeLoadingManager());
     root = loader.parse(buffer, '');
     upgradeLegacyMaterialsToPbr(root);
   } else if (ext === 'amf') {
