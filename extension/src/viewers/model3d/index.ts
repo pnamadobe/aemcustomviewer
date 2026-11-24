@@ -92,6 +92,37 @@ async function parseModelBuffer(buffer: ArrayBuffer, ext: string): Promise<Loade
 
   if (ext === 'glb' || ext === 'gltf') {
     const loader = new GLTFLoader();
+    // Support Browzwear / CLO3D glTF exports that use KHR_materials_pbrSpecularGlossiness
+    loader.register((parser) => ({
+      name: 'KHR_materials_pbrSpecularGlossiness',
+      getMaterialType(materialIndex: number) {
+        const matDef = parser.json?.materials?.[materialIndex];
+        return matDef?.extensions?.KHR_materials_pbrSpecularGlossiness ? THREE.MeshPhysicalMaterial : null;
+      },
+      async extendMaterialParams(materialIndex: number, materialParams: Record<string, any>) {
+        const matDef = parser.json?.materials?.[materialIndex];
+        const sg = matDef?.extensions?.KHR_materials_pbrSpecularGlossiness;
+        if (!sg) return;
+        const pending: Promise<unknown>[] = [];
+        if (Array.isArray(sg.diffuseFactor)) {
+          materialParams.color = new THREE.Color().fromArray(sg.diffuseFactor);
+          if (typeof sg.diffuseFactor[3] === 'number') {
+            materialParams.opacity = sg.diffuseFactor[3];
+          }
+        }
+        if (sg.diffuseTexture !== undefined) {
+          pending.push(parser.assignTexture(materialParams, 'map', sg.diffuseTexture, THREE.SRGBColorSpace));
+        }
+        const gloss = typeof sg.glossinessFactor === 'number' ? sg.glossinessFactor : 1.0;
+        materialParams.roughness = Math.max(0.04, Math.min(1, 1.0 - gloss));
+        materialParams.metalness = 0.0;
+        if (Array.isArray(sg.specularFactor)) {
+          materialParams.specularColor = new THREE.Color().fromArray(sg.specularFactor);
+          materialParams.specularIntensity = Math.min(1, Math.max(sg.specularFactor[0] ?? 0, sg.specularFactor[1] ?? 0, sg.specularFactor[2] ?? 0, 0.2));
+        }
+        await Promise.all(pending);
+      },
+    }));
     const gltf = await loader.parseAsync(buffer, '');
     root = gltf.scene;
     animations = gltf.animations || [];
@@ -474,14 +505,15 @@ export const model3dViewer: ViewerPlugin = {
     const statsBase = `${loaded.triangles.toLocaleString()} tris · ${loaded.vertices.toLocaleString()} verts · ${loaded.meshes} mesh${loaded.meshes === 1 ? '' : 'es'}`;
     ctx.setStatus(statsBase);
 
-    const clock = new THREE.Clock();
     let raf = 0;
     let frames = 0;
-    let lastFps = performance.now();
+    let prevNow = performance.now();
+    let lastFps = prevNow;
 
     const tick = (now: number) => {
       if (ctx.signal.aborted) return;
-      const dt = clock.getDelta();
+      const dt = Math.min(0.1, Math.max(0, (now - prevNow) / 1000));
+      prevNow = now;
       mixer?.update(dt);
       controls.update();
       renderer.render(scene, camera);
