@@ -5,6 +5,8 @@ import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import { KTXLoader } from 'three/examples/jsm/loaders/KTXLoader.js';
 import { TIFFLoader } from 'three/examples/jsm/loaders/TIFFLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { unzipSync } from 'fflate';
 import type { ViewerPlugin } from '../types';
 import type { AnimatedSplatPreview } from '../gsplat';
@@ -94,6 +96,9 @@ export interface ParsedMaterialAsset {
   allMaps: LoadedTextureMap[];
   fabricPhysics: Array<{ label: string; value: string }>;
   rawJsonText?: string;
+  /** Present when a .u3ma/.zfab archive is a 3D Trim package containing an embedded .fbx/.obj mesh */
+  trimModel?: THREE.Object3D;
+  trimParts?: Array<{ name: string; spec: U3mSideSpec }>;
 }
 
 function extOf(name: string): string {
@@ -645,8 +650,15 @@ async function parseU3mSide(
   const clearcoatVal = parseNumberValue(sideObj.clearcoat ?? sideObj.coating);
   if (clearcoatVal !== null) spec.clearcoat = Math.max(0, Math.min(1, clearcoatVal));
 
-  const specVal = parseNumberValue(sideObj.specular);
-  if (specVal !== null) spec.specularIntensity = Math.max(0, Math.min(1, specVal));
+  const specVal = parseNumberValue(sideObj.specular ?? sideObj.specular_value);
+  if (specVal !== null) {
+    spec.specularIntensity = Math.max(0, Math.min(1, specVal));
+    // In Browzwear U3M 1.1 trims (e.g. zipper Pull/Slide), specular_value >= 1.5 denotes metallic hardware
+    if (specVal >= 1.5 && spec.metalness === 0) {
+      spec.metalness = 0.82;
+      spec.roughness = Math.min(spec.roughness, 0.32);
+    }
+  }
 
   const transVal = parseNumberValue(sideObj.transmission ?? sideObj.subsurface);
   if (transVal !== null) spec.transmission = Math.max(0, Math.min(1, transVal));
@@ -703,6 +715,160 @@ async function parseU3mSide(
   return spec;
 }
 
+function synthesizeNormalFromBasecolor(baseMap: LoadedTextureMap): LoadedTextureMap | null {
+  const srcImg = baseMap.texture.image as CanvasImageSource | undefined;
+  if (!srcImg) return null;
+  const w = Math.min(512, baseMap.width || 256);
+  const h = Math.min(512, baseMap.height || 256);
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d');
+  if (!ctx) return null;
+  try {
+    ctx.drawImage(srcImg, 0, 0, w, h);
+  } catch {
+    return null;
+  }
+  const src = ctx.getImageData(0, 0, w, h).data;
+  const outImg = ctx.createImageData(w, h);
+  const dst = outImg.data;
+  const lumAt = (x: number, y: number) => {
+    const cx = ((x % w) + w) % w;
+    const cy = ((y % h) + h) % h;
+    const i = (cy * w + cx) * 4;
+    return (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) / 255;
+  };
+  const strength = 2.2;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx =
+        (lumAt(x + 1, y - 1) + 2 * lumAt(x + 1, y) + lumAt(x + 1, y + 1)) -
+        (lumAt(x - 1, y - 1) + 2 * lumAt(x - 1, y) + lumAt(x - 1, y + 1));
+      const dy =
+        (lumAt(x - 1, y + 1) + 2 * lumAt(x, y + 1) + lumAt(x + 1, y + 1)) -
+        (lumAt(x - 1, y - 1) + 2 * lumAt(x, y - 1) + lumAt(x + 1, y - 1));
+      let nx = -dx * strength;
+      let ny = dy * strength;
+      let nz = 1.0;
+      const len = Math.hypot(nx, ny, nz) || 1;
+      nx /= len;
+      ny /= len;
+      nz /= len;
+      const idx = (y * w + x) * 4;
+      dst[idx] = Math.round((nx * 0.5 + 0.5) * 255);
+      dst[idx + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+      dst[idx + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+      dst[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(outImg, 0, 0);
+  const nrmTex = new THREE.CanvasTexture(c);
+  nrmTex.wrapS = THREE.RepeatWrapping;
+  nrmTex.wrapT = THREE.RepeatWrapping;
+  nrmTex.colorSpace = THREE.LinearSRGBColorSpace;
+  nrmTex.anisotropy = 8;
+  return {
+    channel: 'normal',
+    label: 'Normal (Derived Relief)',
+    fileName: 'derived_normal.png',
+    width: w,
+    height: h,
+    texture: nrmTex,
+    previewUrl: c.toDataURL('image/webp', 0.85),
+  };
+}
+
+function buildTrimModelFromEntry(
+  meshEntry: { name: string; baseLower: string; bytes: Uint8Array },
+  trimParts: Array<{ name: string; spec: U3mSideSpec }>,
+  fallbackSpec: U3mSideSpec,
+): THREE.Object3D | null {
+  const ext = extOf(meshEntry.baseLower);
+  const sliceBuf = meshEntry.bytes.buffer.slice(
+    meshEntry.bytes.byteOffset,
+    meshEntry.bytes.byteOffset + meshEntry.bytes.byteLength,
+  ) as ArrayBuffer;
+
+  let rawRoot: THREE.Object3D;
+  try {
+    if (ext === 'fbx') {
+      const loader = new FBXLoader();
+      rawRoot = loader.parse(sliceBuf, '');
+    } else if (ext === 'obj') {
+      const text = new TextDecoder().decode(sliceBuf);
+      const loader = new OBJLoader();
+      rawRoot = loader.parse(text);
+    } else {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  // Remove embedded FBX cameras & lights so they don't skew bounds or blow out studio lights
+  const toRemove: THREE.Object3D[] = [];
+  rawRoot.traverse((child) => {
+    if ((child as THREE.Light).isLight || (child as THREE.Camera).isCamera) {
+      toRemove.push(child);
+    }
+  });
+  for (const obj of toRemove) obj.parent?.remove(obj);
+
+  const findPartSpec = (matName: string): U3mSideSpec => {
+    const clean = (matName || '').trim().toLowerCase();
+    if (!clean) return trimParts[0]?.spec ?? fallbackSpec;
+    return (
+      trimParts.find((p) => p.name.toLowerCase() === clean)?.spec ??
+      trimParts.find((p) => clean.includes(p.name.toLowerCase()) || p.name.toLowerCase().includes(clean))?.spec ??
+      trimParts[0]?.spec ??
+      fallbackSpec
+    );
+  };
+
+  rawRoot.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    if (mesh.geometry && !mesh.geometry.attributes.normal) {
+      mesh.geometry.computeVertexNormals();
+    }
+    const buildMat = (origMat: THREE.Material | undefined): THREE.Material => {
+      const matName = origMat?.name || mesh.name || '';
+      const partSpec = findPartSpec(matName);
+      const isMetalName = /(pull|slide|zipper|metal|brass|gold|silver|buckle|snap|rivet)/.test(matName.toLowerCase());
+      const mat = createPhysicalMaterialFromSide(partSpec, null, 'standard', false) as THREE.MeshPhysicalMaterial;
+      mat.name = matName;
+      if (isMetalName && mat.metalness < 0.5) {
+        mat.metalness = 0.82;
+        mat.roughness = Math.min(mat.roughness, 0.32);
+      }
+      return mat;
+    };
+    mesh.material = Array.isArray(mesh.material)
+      ? mesh.material.map((m) => buildMat(m))
+      : buildMat(mesh.material);
+  });
+
+  rawRoot.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  rawRoot.traverse((obj) => {
+    const m = obj as THREE.Mesh;
+    if (m.isMesh && m.geometry) box.expandByObject(m);
+  });
+  if (box.isEmpty()) return null;
+
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const scale = 2.05 / maxDim;
+
+  const wrapper = new THREE.Group();
+  rawRoot.position.sub(center);
+  wrapper.add(rawRoot);
+  wrapper.scale.setScalar(scale);
+  return wrapper;
+}
+
 export async function parseMaterialBuffer(buffer: ArrayBuffer, fileName: string): Promise<ParsedMaterialAsset> {
   const ext = extOf(fileName);
   const cleanTitle = baseNameOf(fileName).replace(/\.[^.]+$/, '');
@@ -736,12 +902,6 @@ export async function parseMaterialBuffer(buffer: ArrayBuffer, fileName: string)
       );
     };
 
-    // Locate .u3m or .json descriptor
-    const u3mEntry =
-      entries.find((e) => e.baseLower.endsWith('.u3m')) ??
-      entries.find((e) => e.baseLower.endsWith('.json')) ??
-      null;
-
     const usedEntryNames = new Set<string>();
     const allMaps: LoadedTextureMap[] = [];
     let materialName = cleanTitle;
@@ -752,12 +912,20 @@ export async function parseMaterialBuffer(buffer: ArrayBuffer, fileName: string)
     let front = defaultSideSpec();
     let back: U3mSideSpec | undefined;
 
-    if (u3mEntry) {
-      usedEntryNames.add(u3mEntry.name);
+    // Check for Browzwear 3D Trim group_*.json descriptor
+    const groupEntry = entries.find((e) => e.baseLower.startsWith('group_') && e.baseLower.endsWith('.json')) ?? null;
+    const u3mEntries = entries.filter((e) => e.baseLower.endsWith('.u3m'));
+    const primaryU3mEntry =
+      u3mEntries[0] ?? entries.find((e) => e.baseLower.endsWith('.json') && e !== groupEntry) ?? groupEntry;
+
+    if (primaryU3mEntry) {
+      usedEntryNames.add(primaryU3mEntry.name);
       try {
-        rawJsonText = new TextDecoder().decode(u3mEntry.bytes);
+        rawJsonText = new TextDecoder().decode(primaryU3mEntry.bytes);
         const u3m = JSON.parse(rawJsonText);
-        const u3mDir = u3mEntry.norm.includes('/') ? u3mEntry.norm.slice(0, u3mEntry.norm.lastIndexOf('/')) : '';
+        const u3mDir = primaryU3mEntry.norm.includes('/')
+          ? primaryU3mEntry.norm.slice(0, primaryU3mEntry.norm.lastIndexOf('/'))
+          : '';
 
         schemaVersion = typeof u3m.schema === 'string' ? `U3M ${u3m.schema}` : 'U3M 1.0';
         materialName = u3m.material?.name || u3m.name || cleanTitle;
@@ -776,8 +944,59 @@ export async function parseMaterialBuffer(buffer: ArrayBuffer, fileName: string)
       }
     }
 
+    // Parse all sub-material .u3m files (used by 3D Trims like Button.u3m, Thread.u3m, Pull.u3m, Slide.u3m)
+    const trimParts: Array<{ name: string; spec: U3mSideSpec }> = [];
+    for (const subEntry of u3mEntries) {
+      usedEntryNames.add(subEntry.name);
+      try {
+        const subText = new TextDecoder().decode(subEntry.bytes);
+        const subU3m = JSON.parse(subText);
+        const subDir = subEntry.norm.includes('/') ? subEntry.norm.slice(0, subEntry.norm.lastIndexOf('/')) : '';
+        const partName =
+          subU3m.material?.name || subU3m.name || baseNameOf(subEntry.name).replace(/\.u3m$/i, '');
+        const partFront = subU3m.material?.front ?? subU3m.front ?? subU3m.material ?? subU3m;
+        const partSpec = await parseU3mSide(partFront, subDir, findZipEntry, usedEntryNames, allMaps);
+        trimParts.push({ name: partName, spec: partSpec });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // If a Browzwear group_*.json is present (e.g. 3D Trim button/zipper), extract its composite textures & metadata
+    let isTrim3d = false;
+    if (groupEntry) {
+      usedEntryNames.add(groupEntry.name);
+      try {
+        const groupText = new TextDecoder().decode(groupEntry.bytes);
+        const groupJson = JSON.parse(groupText);
+        const bw = groupJson.custom?.Browzwear ?? groupJson.custom?.browzwear;
+        if (groupJson.name) materialName = groupJson.name;
+        if (bw?.type === 'trim3d') {
+          isTrim3d = true;
+          schemaVersion = 'U3MA 3D Trim';
+        }
+        if (bw?.material && typeof bw.material === 'object') {
+          const groupSpec = await parseU3mSide(bw.material, '', findZipEntry, usedEntryNames, allMaps);
+          for (const [ch, map] of Object.entries(groupSpec.maps)) {
+            if (map && !front.maps[ch as MapChannel]) {
+              front.maps[ch as MapChannel] = map;
+            }
+          }
+          if (groupSpec.physicalWidthCm && !front.physicalWidthCm) {
+            front.physicalWidthCm = groupSpec.physicalWidthCm;
+            front.physicalHeightCm = groupSpec.physicalHeightCm;
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
     // Auto-discover any remaining image textures in the archive by filename heuristics
-    const imageEntries = entries.filter((e) => IMAGE_EXTS.has(extOf(e.baseLower)));
+    // (Skip tiny sub-item preview icons when real textures exist)
+    const imageEntries = entries.filter(
+      (e) => IMAGE_EXTS.has(extOf(e.baseLower)) && !e.lower.includes('/preview.'),
+    );
     for (const imgEntry of imageEntries) {
       if (usedEntryNames.has(imgEntry.name)) continue;
       const match = classifyChannelFromFilename(imgEntry.baseLower);
@@ -793,10 +1012,10 @@ export async function parseMaterialBuffer(buffer: ArrayBuffer, fileName: string)
       }
     }
 
-    // If still no basecolor map, use the largest remaining image in the archive as basecolor
+    // If still no basecolor map, use the largest remaining non-alpha image in the archive as basecolor
     if (!front.maps.basecolor && imageEntries.length > 0) {
       const remaining = imageEntries
-        .filter((e) => !usedEntryNames.has(e.name))
+        .filter((e) => !usedEntryNames.has(e.name) && !e.baseLower.includes('alpha'))
         .sort((a, b) => b.bytes.byteLength - a.bytes.byteLength);
       const pick = remaining[0] ?? imageEntries[0];
       if (pick) {
@@ -812,6 +1031,22 @@ export async function parseMaterialBuffer(buffer: ArrayBuffer, fileName: string)
       }
     }
 
+    // Check if the .u3ma/.zfab archive embeds a 3D mesh (.fbx or .obj, e.g. 3D Trim button/zipper)
+    const meshEntry = entries.find((e) => {
+      const mExt = extOf(e.baseLower);
+      return mExt === 'fbx' || mExt === 'obj';
+    });
+    const trimModel = meshEntry ? buildTrimModelFromEntry(meshEntry, trimParts, front) ?? undefined : undefined;
+    if (trimModel && !isTrim3d) {
+      schemaVersion = 'U3MA 3D Trim';
+    }
+    if (trimParts.length > 0) {
+      fabricPhysics.unshift({
+        label: 'Trim Sub-Parts',
+        value: trimParts.map((p) => p.name).join(', '),
+      });
+    }
+
     allMaps.sort((a, b) => CHANNEL_ORDER.indexOf(a.channel) - CHANNEL_ORDER.indexOf(b.channel));
 
     return {
@@ -824,6 +1059,8 @@ export async function parseMaterialBuffer(buffer: ArrayBuffer, fileName: string)
       allMaps,
       fabricPhysics,
       rawJsonText,
+      trimModel,
+      trimParts: trimParts.length > 0 ? trimParts : undefined,
     };
   }
 
@@ -870,22 +1107,44 @@ export async function parseMaterialBuffer(buffer: ArrayBuffer, fileName: string)
     };
   }
 
-  // Case 3: Single 3D Texture Map (.dds, .ktx, .ktx2, .tga, .tif, .tiff) or .sbsar with embedded PNG
+  // Case 3: Single 3D Texture Map (.dds, .ktx, .ktx2, .tga, .tif, .tiff) or .sbsar (Substance rendition or 7z)
   const guessed = classifyChannelFromFilename(fileName)?.channel ?? 'basecolor';
   const front = defaultSideSpec();
   const u8 = new Uint8Array(buffer);
 
-  // If .sbsar or unknown container, check for embedded PNG magic (89 50 4E 47 0D 0A 1A 0A)
   if (ext === 'sbsar' || ext === 'ktx2') {
-    const pngSlice = extractEmbeddedPng(u8);
+    const isPng = u8.byteLength > 8 && u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47;
+    const isJpg = u8.byteLength > 4 && u8[0] === 0xff && u8[1] === 0xd8;
+    const pngSlice = isPng || isJpg ? u8 : extractEmbeddedPng(u8);
     if (pngSlice) {
-      const loaded = await decodeTextureBytes(pngSlice, `${cleanTitle}.png`, 'basecolor');
+      const sliceExt = isJpg ? 'jpg' : 'png';
+      const loaded = await decodeTextureBytes(pngSlice, `${cleanTitle}.${sliceExt}`, 'basecolor');
       front.maps.basecolor = loaded;
+      const allMaps = [loaded];
+      const synthNormal = synthesizeNormalFromBasecolor(loaded);
+      if (synthNormal) {
+        front.maps.normal = synthNormal;
+        front.normalScale = 0.75;
+        allMaps.push(synthNormal);
+      }
       return {
-        formatLabel: ext.toUpperCase(),
+        formatLabel: ext === 'sbsar' ? 'Substance 3D (SBSAR)' : 'KTX2 Texture',
         materialName: cleanTitle,
         front,
-        allMaps: [loaded],
+        allMaps,
+        fabricPhysics: [],
+      };
+    }
+    // If raw 7z .sbsar without an AEM rendition, fall back to procedural weave so viewer never crashes
+    if (ext === 'sbsar') {
+      const proc = buildProceduralWeaveMaps(new THREE.Color(0x94a3b8), 0.65);
+      front.maps.basecolor = proc.basecolor;
+      front.maps.normal = proc.normal;
+      return {
+        formatLabel: 'Substance 3D (SBSAR)',
+        materialName: cleanTitle,
+        front,
+        allMaps: [proc.basecolor, proc.normal],
         fabricPhysics: [],
       };
     }
@@ -931,7 +1190,7 @@ function extractEmbeddedPng(u8: Uint8Array): Uint8Array | null {
   return null;
 }
 
-export type SwatchGeometryKind = 'cloth' | 'sphere' | 'pillow' | 'cylinder' | 'plane';
+export type SwatchGeometryKind = 'trim3d' | 'cloth' | 'sphere' | 'pillow' | 'cylinder' | 'plane';
 
 function ensureUv2AndTangents(geom: THREE.BufferGeometry): THREE.BufferGeometry {
   if (geom.attributes.uv && !geom.attributes.uv1) {
@@ -1204,13 +1463,17 @@ export const texture3dViewer: ViewerPlugin = {
     rimLight.position.set(-3.5, 2.0, -2.8);
     scene.add(keyLight, rimLight);
 
-    // Use Draped Fabric Cloth for .u3ma/.u3m/.zfab, Shader Ball for generic textures
+    // Use embedded 3D Trim mesh (FBX) if present, else Draped Fabric Cloth for .u3ma/.u3m/.zfab/.sbsar, or Shader Ball
     const ext = extOf(meta.name);
-    const isFabricFormat = ext === 'u3ma' || ext === 'u3m' || ext === 'zfab';
+    const isFabricFormat = ext === 'u3ma' || ext === 'u3m' || ext === 'zfab' || ext === 'sbsar';
     const geom = createSwatchGeometry(isFabricFormat ? 'cloth' : 'sphere');
     const mat = createPhysicalMaterialFromSide(parsed.front, null, 'standard', false);
     const mesh = new THREE.Mesh(geom, mat);
-    scene.add(mesh);
+    if (parsed.trimModel) {
+      scene.add(parsed.trimModel);
+    } else {
+      scene.add(mesh);
+    }
 
     // Prepare a small 2D swatch inset if basecolor preview exists
     let swatchImg: HTMLImageElement | null = null;
@@ -1305,16 +1568,16 @@ export const texture3dViewer: ViewerPlugin = {
     ctx.setProgress(null);
 
     const ext = extOf(ctx.meta.name);
-    const isFabricDefault = ext === 'u3ma' || ext === 'u3m' || ext === 'zfab';
+    const isFabricDefault = ext === 'u3ma' || ext === 'u3m' || ext === 'zfab' || ext === 'sbsar';
 
     // State
     let activeSideKey: 'front' | 'back' = 'front';
     const getActiveSide = () => (activeSideKey === 'back' && parsed.back ? parsed.back : parsed.front);
-    let repeat = defaultRepeatForSide(parsed.front);
+    let repeat = parsed.trimModel ? 1 : defaultRepeatForSide(parsed.front);
     applyRepeatToSide(parsed.front, repeat);
     if (parsed.back) applyRepeatToSide(parsed.back, repeat);
 
-    let meshKind: SwatchGeometryKind = isFabricDefault ? 'cloth' : 'sphere';
+    let meshKind: SwatchGeometryKind = parsed.trimModel ? 'trim3d' : isFabricDefault ? 'cloth' : 'sphere';
     let soloChannel: MapChannel | null = null;
     let viewMode: '3d' | '2d' | 'split' = '3d';
     let lightingPreset: LightingPreset = 'studio';
@@ -1390,10 +1653,22 @@ export const texture3dViewer: ViewerPlugin = {
     grid.position.y = -1.18;
     scene.add(grid);
 
-    let currentGeom = createSwatchGeometry(meshKind);
+    let currentGeom = createSwatchGeometry(meshKind === 'trim3d' ? 'cloth' : meshKind);
     let currentMat = createPhysicalMaterialFromSide(getActiveSide(), soloChannel, relief, wireframe);
     const swatchMesh = new THREE.Mesh(currentGeom, currentMat);
     scene.add(swatchMesh);
+    if (parsed.trimModel) {
+      scene.add(parsed.trimModel);
+    }
+    const syncMeshVisibility = () => {
+      if (parsed.trimModel) {
+        parsed.trimModel.visible = meshKind === 'trim3d';
+        swatchMesh.visible = meshKind !== 'trim3d';
+      } else {
+        swatchMesh.visible = true;
+      }
+    };
+    syncMeshVisibility();
 
     const camera = new THREE.PerspectiveCamera(40, 1, 0.02, 100);
     camera.position.set(0.35, 1.15, 2.75);
@@ -1416,9 +1691,12 @@ export const texture3dViewer: ViewerPlugin = {
     };
 
     const rebuildGeometry = () => {
-      currentGeom.dispose();
-      currentGeom = createSwatchGeometry(meshKind);
-      swatchMesh.geometry = currentGeom;
+      syncMeshVisibility();
+      if (meshKind !== 'trim3d') {
+        currentGeom.dispose();
+        currentGeom = createSwatchGeometry(meshKind);
+        swatchMesh.geometry = currentGeom;
+      }
     };
 
     const render2dTilePane = () => {
@@ -1637,8 +1915,11 @@ export const texture3dViewer: ViewerPlugin = {
       }, 1800);
     };
 
-    const meshOrder: SwatchGeometryKind[] = ['cloth', 'sphere', 'pillow', 'cylinder', 'plane'];
+    const meshOrder: SwatchGeometryKind[] = parsed.trimModel
+      ? ['trim3d', 'cloth', 'sphere', 'pillow', 'cylinder', 'plane']
+      : ['cloth', 'sphere', 'pillow', 'cylinder', 'plane'];
     const meshLabels: Record<SwatchGeometryKind, string> = {
+      trim3d: '3D Trim (FBX)',
       cloth: 'Draped Cloth',
       sphere: 'Shader Ball',
       pillow: 'Fabric Swatch',

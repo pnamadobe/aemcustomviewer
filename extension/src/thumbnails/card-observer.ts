@@ -504,7 +504,8 @@ async function processCard(row: HTMLElement, getAuth: () => AuthSnapshot | null)
           : null;
       if (!meta) return;
 
-      if (meta.size && meta.size > 60 * 1024 * 1024) {
+      const isSbsar = meta.name.toLowerCase().endsWith('.sbsar');
+      if (!isSbsar && meta.size && meta.size > 60 * 1024 * 1024) {
         failed.add(lockKey);
         if (previewSlot.isConnected) {
           const wrap = previewSlot.querySelector<HTMLElement>('[data-acv-card-thumb]');

@@ -1,6 +1,6 @@
 {
   "name": "aem-assets-custom-viewer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "build": "esbuild src/content.ts src/page-hook.ts src/popup.ts --bundle --minify --format=iife --target=chrome111 --loader:.css=text --outdir=dist",

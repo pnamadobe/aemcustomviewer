@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AEM Assets View – Custom Viewer",
-  "version": "0.2.0",
-  "description": "Renders proprietary, 3D, font, and RAW formats in the Assets View main preview area and Card View.",
+  "version": "0.3.0",
+  "description": "Renders proprietary, 3D, DPC trim/fabric (U3MA, FBX, USDZ, SBSAR), font, and RAW formats in Assets View.",
   "permissions": ["storage"],
   "host_permissions": [
     "https://experience.adobe.com/*",

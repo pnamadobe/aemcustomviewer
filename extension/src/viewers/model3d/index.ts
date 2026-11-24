@@ -3,6 +3,12 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { USDLoader } from 'three/examples/jsm/loaders/USDLoader.js';
+import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
+import { ThreeMFLoader } from 'three/examples/jsm/loaders/3MFLoader.js';
+import { TDSLoader } from 'three/examples/jsm/loaders/TDSLoader.js';
+import { AMFLoader } from 'three/examples/jsm/loaders/AMFLoader.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { ViewerPlugin } from '../types';
 import type { AnimatedSplatPreview } from '../gsplat';
@@ -19,6 +25,54 @@ interface LoadedModel {
   meshes: number;
 }
 
+function upgradeLegacyMaterialsToPbr(root: THREE.Object3D) {
+  const toRemove: THREE.Object3D[] = [];
+  root.traverse((child) => {
+    if ((child as THREE.Light).isLight || (child as THREE.Camera).isCamera) {
+      toRemove.push(child);
+      return;
+    }
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    if (mesh.geometry && !mesh.geometry.attributes.normal) {
+      mesh.geometry.computeVertexNormals();
+    }
+    const upgradeOne = (m: THREE.Material): THREE.Material => {
+      if ((m as THREE.MeshStandardMaterial).isMeshStandardMaterial) return m;
+      const anyMat = m as any;
+      const col: THREE.Color = anyMat.color ? anyMat.color.clone() : new THREE.Color(0xd4d4d8);
+      // Desaturate pure CAD layer assignment colors (e.g. #ff00ff magenta on FBX zipper slides)
+      const hsl = { h: 0, s: 0, l: 0 };
+      col.getHSL(hsl);
+      const nameLower = (m.name || '').toLowerCase();
+      const isMetalPart = /(slide|pull|zipper|metal|brass|gold|silver|buckle|snap|rivet|eyelet)/.test(nameLower);
+      if (hsl.s > 0.85 && (Math.abs(hsl.h - 0.83) < 0.08 || Math.abs(hsl.h - 0.33) < 0.08)) {
+        // Pure magenta/green CAD placeholder -> brushed gunmetal or warm brass
+        col.setHex(isMetalPart ? 0xd4af37 : 0xcbd5e1);
+      }
+      return new THREE.MeshStandardMaterial({
+        name: m.name,
+        color: col,
+        map: anyMat.map ?? null,
+        normalMap: anyMat.normalMap ?? null,
+        bumpMap: anyMat.bumpMap ?? null,
+        alphaMap: anyMat.alphaMap ?? null,
+        transparent: Boolean(anyMat.transparent),
+        opacity: typeof anyMat.opacity === 'number' ? anyMat.opacity : 1,
+        roughness: isMetalPart ? 0.28 : 0.42,
+        metalness: isMetalPart ? 0.78 : 0.12,
+        side: THREE.DoubleSide,
+      });
+    };
+    mesh.material = Array.isArray(mesh.material)
+      ? mesh.material.map(upgradeOne)
+      : mesh.material
+        ? upgradeOne(mesh.material)
+        : new THREE.MeshStandardMaterial({ color: 0xd4d4d8, roughness: 0.38, metalness: 0.15, side: THREE.DoubleSide });
+  });
+  for (const obj of toRemove) obj.parent?.remove(obj);
+}
+
 async function parseModelBuffer(buffer: ArrayBuffer, ext: string): Promise<LoadedModel> {
   let root: THREE.Object3D;
   let animations: THREE.AnimationClip[] = [];
@@ -28,6 +82,36 @@ async function parseModelBuffer(buffer: ArrayBuffer, ext: string): Promise<Loade
     const gltf = await loader.parseAsync(buffer, '');
     root = gltf.scene;
     animations = gltf.animations || [];
+  } else if (ext === 'fbx') {
+    const loader = new FBXLoader();
+    root = loader.parse(buffer, '');
+    animations = (root as any).animations || [];
+    upgradeLegacyMaterialsToPbr(root);
+  } else if (ext === 'usdz' || ext === 'usda' || ext === 'usdc' || ext === 'usd') {
+    const loader = new USDLoader();
+    root = loader.parse(buffer);
+    upgradeLegacyMaterialsToPbr(root);
+  } else if (ext === 'dae') {
+    const text = new TextDecoder().decode(buffer);
+    const loader = new ColladaLoader();
+    const collada = loader.parse(text, '');
+    if (!collada) throw new Error('Invalid Collada DAE');
+    root = collada.scene;
+    animations = (collada as any).animations || [];
+    upgradeLegacyMaterialsToPbr(root);
+  } else if (ext === '3mf') {
+    const loader = new ThreeMFLoader();
+    root = loader.parse(buffer);
+    root.rotation.set(-Math.PI / 2, 0, 0);
+    upgradeLegacyMaterialsToPbr(root);
+  } else if (ext === '3ds') {
+    const loader = new TDSLoader();
+    root = loader.parse(buffer, '');
+    upgradeLegacyMaterialsToPbr(root);
+  } else if (ext === 'amf') {
+    const loader = new AMFLoader();
+    root = loader.parse(buffer);
+    upgradeLegacyMaterialsToPbr(root);
   } else if (ext === 'obj') {
     const text = new TextDecoder().decode(buffer);
     const loader = new OBJLoader();
@@ -38,6 +122,7 @@ async function parseModelBuffer(buffer: ArrayBuffer, ext: string): Promise<Loade
           color: 0xd4d4d8,
           roughness: 0.38,
           metalness: 0.15,
+          side: THREE.DoubleSide,
         });
       }
     });
@@ -55,14 +140,26 @@ async function parseModelBuffer(buffer: ArrayBuffer, ext: string): Promise<Loade
     throw new Error(`Unsupported 3D extension: ${ext}`);
   }
 
-  // Normalize scale and center at origin
-  const box = new THREE.Box3().setFromObject(root);
+  // Normalize scale and center at origin using mesh bounds
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  root.traverse((obj) => {
+    const m = obj as THREE.Mesh;
+    if (m.isMesh && m.geometry) {
+      box.expandByObject(m);
+    }
+  });
+  if (box.isEmpty()) box.setFromObject(root);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
   const scale = 2.2 / maxDim;
-  root.scale.multiplyScalar(scale);
-  root.position.sub(center.multiplyScalar(scale));
+
+  const wrapper = new THREE.Group();
+  root.position.sub(center);
+  wrapper.add(root);
+  wrapper.scale.setScalar(scale);
+  root = wrapper;
 
   let vertices = 0;
   let triangles = 0;
@@ -103,8 +200,19 @@ export const model3dViewer: ViewerPlugin = {
   id: 'model3d',
   label: '3D Model & Mesh',
   badge: '3D',
-  extensions: ['glb', 'gltf', 'obj', 'stl'],
-  mimeTypes: ['model/gltf-binary', 'model/gltf+json', 'model/obj', 'model/stl', 'application/sla'],
+  extensions: ['glb', 'gltf', 'fbx', 'obj', 'stl', 'usdz', 'usda', 'usdc', 'usd', 'dae', '3mf', '3ds', 'amf'],
+  mimeTypes: [
+    'model/gltf-binary',
+    'model/gltf+json',
+    'model/obj',
+    'model/stl',
+    'model/vnd.usdz+zip',
+    'model/vnd.usd',
+    'model/vnd.collada+xml',
+    'model/3mf',
+    'application/x-fbx',
+    'application/sla',
+  ],
 
   async renderThumbnail(meta, fetchBuffer) {
     const ext = extOf(meta.name);

@@ -4,7 +4,7 @@
 ```
 experience.adobe.com (Unified Shell, top frame)
 └── same-origin iframe: /thunderbird/solutions/CQ-assets-app (id^="exc-app-sandbox-ddam")
-    ├── ISOLATED world: content.js (873 KB minified)
+    ├── ISOLATED world: content.js (v0.3.0, 1.1 MB minified)
     │    ├── auth.ts                 (reads repoId + shellCachedTokens directly from sessionStorage)
     │    ├── router.ts               (watches #/detail/content/dam/... route changes)
     │    ├── overlay.ts              (mounts closed Shadow DOM inside [class*="Detail__previewContainer__"])
@@ -13,8 +13,8 @@ experience.adobe.com (Unified Shell, top frame)
     │    │    └── card-observer.ts   (Card View [role="row"][data-key] custom thumbnails & video hover-scrub)
     │    └── viewers/                (ViewerPlugin registry)
     │         ├── gsplat/            (.splat, .ply, .splatv — WebGL2 + WASM sort + 1GB+ stream decimator)
-    │         ├── model3d/           (.glb, .gltf, .obj, .stl — Three.js Studio PBR)
-    │         ├── texture3d/         (.u3ma, .u3m, .zfab, .sbsar, .mtlx, .dds, .ktx, .ktx2, .tga, .mtl — 3D PBR Material & Fabric Inspector)
+    │         ├── model3d/           (.glb, .gltf, .fbx, .obj, .stl, .usdz, .usd, .dae, .3mf, .3ds, .amf — Three.js Studio PBR)
+    │         ├── texture3d/         (.u3ma, .u3m, .zfab, .sbsar, .mtlx, .dds, .ktx, .ktx2, .tga, .mtl — 3D PBR Material, Trim & Fabric Inspector)
     │         ├── font/              (.ttf, .otf, .woff, .woff2 — FontFace + OpenType fvar sliders)
     │         ├── raw/               (.cr3, .cr2, .nef, .arw, .dng, .raf, .rw2, .orf, .pef, .iiq, .3fr, .hdr, .exr)
     │         └── audio/             (.mp3, .wav, .flac, .ogg — WebAudio FFT + OfflineAudioContext waveform)
@@ -40,10 +40,12 @@ experience.adobe.com (Unified Shell, top frame)
 1. **Card View (Folders, Search Results, and Collections)**:
    - `card-observer.ts` watches `div[role="row"][data-key^="urn:aaid:aem:"]` via a filtered `MutationObserver`.
    - **Video cards (`.mp4`, `.mov`, `.webm`, `.m4v`, `.ogv`)**: Displays a `⇄ SCRUB` badge. On first hover, streams AEM's `cq5dam.preview.mp4` proxy rendition via `;api=block_download;renditionName=cq5dam.preview.mp4` (with a 15-minute signed URL cache TTL) while extracting a **24-frame WebP scrub strip** in the background and caching it in `IndexedDB` (`⇄ SCRUB · CACHED`). Subsequent hovers scrub directly from `IndexedDB` with zero network requests.
-   - **Plugin-matched cards (`.splat`, `.ply`, `.glb`, `.gltf`, `.obj`, `.stl`, `.ttf`, `.otf`, `.woff2`, `.cr3`, `.nef`, `.arw`, `.hdr`, `.exr`, `.mp3`, etc.)**:
+   - **Plugin-matched cards (`.splat`, `.ply`, `.glb`, `.gltf`, `.fbx`, `.usdz`, `.obj`, `.stl`, `.dae`, `.3mf`, `.u3ma`, `.u3m`, `.zfab`, `.sbsar`, `.ttf`, `.otf`, `.woff2`, `.cr3`, `.nef`, `.arw`, `.hdr`, `.exr`, `.mp3`, etc.)**:
      - Checks `IndexedDB` first. If cached, mounts immediately into `[slot="preview"]` and updates the `"Binary"` subtitle in `[slot="description"]`.
      - If uncached, resolves metadata by path (in Folder Browse) or by `urn:aaid:aem:<uuid>` (in Search/Collections), queues `plugin.renderThumbnail(meta, fetchBuffer)` (1 asset at a time), caches the resulting static WebP or 16-frame `acv-anim-v4` WebP animation payload in `IndexedDB`, and swaps it into the card.
      - For Camera RAW files (`> 8 MB`), `renderThumbnail` probes the first 8 MB via `Range: bytes=0-8388607` to extract the embedded JPEG preview without downloading the full RAW container.
+     - For compiled `.sbsar` (7z) Substance archives, fetches AEM's rendered preview rendition (`cq5dam.web` / `cq5dam.thumbnail`) in ~50 ms instead of downloading 30–120 MB of 7z bytecode, derives a tangent-space normal map, and renders the 3D PBR swatch.
+     - For Browzwear 3D Trim `.u3ma` packages (`"type": "trim3d"`), unpacks the embedded `.fbx`/`.obj` trim mesh and binds each sub-mesh (`Button`, `Thread`, `Pull`, `Slide`) to its corresponding `.u3m` sub-material.
    - **Flicker-Free 3D Card Animation (`acv-anim-v4`)**:
      - Scales `gsplat`'s camera focal length (`fx`, `fy`) to the thumbnail canvas size, applies luminance-weighted subject framing and an adaptive gamma LUT (`autoToneMapCanvas`), and composites frames over a permanently opaque base `<img class="acv-layer-base">` so the dark card background never bleeds through.
 2. **Details View (`#/detail/content/dam/...`)**:
